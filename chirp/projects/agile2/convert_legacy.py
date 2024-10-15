@@ -16,6 +16,7 @@
 """Conversion for TFRecord embeddings to Hoplite DB."""
 
 import os
+from typing import Tuple
 from chirp.inference import embed_lib
 from chirp.inference import tf_examples
 from chirp.projects.agile2 import embed
@@ -23,7 +24,10 @@ from chirp.projects.hoplite import in_mem_impl
 from chirp.projects.hoplite import interface
 from chirp.projects.hoplite import sqlite_impl
 from etils import epath
+from pathlib import Path
 import numpy as np
+import pandas as pd
+import tensorflow as tf
 import tqdm
 
 
@@ -36,16 +40,39 @@ def convert_tfrecords(
 ):
   """Convert a TFRecord embeddings dataset to a Hoplite DB."""
   ds = tf_examples.create_embeddings_dataset(
-      embeddings_path,
-      'embeddings-*',
+    embeddings_path,
+    'embeddings-*',
   )
+
+  legacy_config = embed_lib.load_embedding_config(embeddings_path)
+
+  return convert_tfdataset(
+    ds,
+    db_type,
+    dataset_name,
+    legacy_config,
+    max_count,
+    **kwargs,
+  )
+  
+
+def convert_tfdataset(
+    ds: str,
+    db_type: str,
+    dataset_name: str,
+    legacy_config: dict,
+    max_count: int = -1,
+    **kwargs,
+):
+  """Convert a tf dataset to a Hoplite DB."""
+
   # Peek at one embedding to get the embedding dimension.
   for ex in ds.as_numpy_iterator():
     emb_dim = ex['embedding'].shape[-1]
     break
   else:
     raise ValueError('No embeddings found.')
-
+  
   if db_type == 'sqlite':
     db_path = kwargs['db_path']
     if epath.Path(db_path).exists():
@@ -62,7 +89,7 @@ def convert_tfrecords(
   db.setup()
 
   # Convert embedding config to new format and insert into the DB.
-  legacy_config = embed_lib.load_embedding_config(embeddings_path)
+
   model_config = embed.ModelConfig(
       model_key=legacy_config.embed_fn_config.model_key,
       embedding_dim=emb_dim,
@@ -107,3 +134,106 @@ def convert_tfrecords(
   hours_equiv = num_embeddings / 60 / 60 * hop_size_s
   print(f'\n\nHours of audio equivalent : {hours_equiv:.2f}')
   return db
+
+
+def convert_parquet(
+    parquet_folder: str,
+    db_type: str,
+    dataset_name: str,
+    max_count: int = -1,
+    prefetch: int = 128,
+    **kwargs,
+):
+  """
+  Convert a folder of parquet embeddings files into a TF dataset 
+  so it can be converted to a hoplite DB.
+
+  Requires a config json file in the parquet folder in the same format as the TF record config.
+
+  @param parquet_folder str; path to the folder containing the parquet files
+  @param db_type str; type of DB to create, sqlite or in_mem
+  @param dataset_name str; name of the dataset (the database can contain multiple datasets)
+  @param max_count int; maximum number of embeddings to convert
+  """
+  
+  parquet_filepaths = [f for f in Path(parquet_folder).rglob('*.parquet')]
+  
+  def generator():
+    for fp in parquet_filepaths:
+        df = pd.read_parquet(fp)
+        embeddings_table = df_to_embeddings(df)
+        embeddings, filename, timestamp_s, embedding_shape = extract_metadata(embeddings_table)
+        yield {
+            'filename': filename.encode(),
+            'timestamp_s': timestamp_s,
+            'embedding': embeddings,
+            'embedding_shape': embedding_shape
+        }
+    
+  output_signature = {
+      'filename': tf.TensorSpec(shape=(), dtype=tf.string),
+      'timestamp_s': tf.TensorSpec(shape=(), dtype=tf.float32),
+      'embedding': tf.TensorSpec(shape=(None, None, 1280), dtype=tf.float32),
+      'embedding_shape': tf.TensorSpec(shape=(3,), dtype=tf.int32)
+  }
+
+  # debug only
+  for item in generator():
+    print("Generator first item: ")
+    for key, value in item.items():
+      print(key, ": ", value)
+    break
+    
+  ds = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
+  ds = ds.prefetch(prefetch)
+
+  legacy_config = embed_lib.load_embedding_config(parquet_folder)
+  
+  return convert_tfdataset(
+      ds,
+      db_type,
+      dataset_name,
+      legacy_config,
+      max_count,
+      **kwargs,
+  )
+    
+
+def extract_metadata(embeddings_table: pd.DataFrame, dtype = np.float32) -> Tuple[str, float, Tuple[int, int, int]]:
+    """
+    Extracts embeddings and metadata from the dataframe.
+    @param df pd.DataFrame; DataFrame with metadata and embeddings
+    @returns Tuple; embeddings array filename, timestamp, and embedding shape
+
+    For now, we are assuming that each DataFrame corresponds to a single audio file starting at timestamp 0.0.
+    """
+
+    filename = embeddings_table[0][0][0]
+    timestamp_s = 0.0  
+    embedding_shape = embeddings_table.shape
+    embeddings = embeddings_table[:, :, 2:1282].astype(dtype)
+    return embeddings, filename, timestamp_s, embedding_shape
+
+
+def df_to_embeddings(df: pd.DataFrame) -> np.array:
+
+    """
+    Converts a dataframe (tabular format) of embeddings to a 3D array (offset, channel, feature) format.
+    @param df pd.DataFrame; DataFrame with (n_segments * n_channels) rows and n_features + 2 columns (including offset and channel)
+    @returns np.array; array of shape (n_segment, n_channels, n_features + 2)
+
+    The reason for n_features + 2 is that it includes 'filename' and 'offset' columns
+    """
+
+    # Determine the number of channels and features
+    n_channels = df['channel'].nunique()
+    n_features = len(df.columns) - 2  # Subtracting the offset and channel columns
+
+    # Sort the DataFrame based on 'offset' and 'channel' to ensure correct ordering
+    df_sorted = df.sort_values(by=['offset', 'channel'])
+
+    # Drop the 'channel' column and pivot the DataFrame to get the correct shape
+    df_pivot = df_sorted.drop('channel', axis=1)
+    reshaped_array = df_pivot.values.reshape(-1, n_channels, n_features + 1)
+
+    return reshaped_array
