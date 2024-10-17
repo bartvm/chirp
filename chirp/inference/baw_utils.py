@@ -28,8 +28,13 @@ import numpy as np
 import requests
 import soundfile
 
-
+# regex to extract a recording id from a canonical file name
 FILE_ID_TO_UID_PATTERN = re.compile(r".*_(\d+).[^\.]+$")
+
+# regex to extract the domain and recording id from a full recording URL
+FULL_RECORDING_PATTERN = re.compile(r"https://(.+?)/audio_recordings/(\d+)/original")
+
+BAW_DOMAINS = ["api.acousticobservatory.org", "api.ecosounds.org", "api.staging.ecosounds.org"]
 
 
 def make_baw_audio_url_from_file_id(
@@ -42,14 +47,17 @@ def make_baw_audio_url_from_file_id(
   # Extract the recording UID. Example:
   # 'site_0277/20210428T100000+1000_Five-Rivers-Dry-A_909057.flac' -> 909057
   # 'site_0277/20210428T100000+1000_Five-Rivers-Dry-A_909057.wav' -> 909057
-  pattern = re.compile(r".*_(\d+)\.[^\.]+$")
-  match = pattern.search(file_id)
-  if not match:
-    raise ValueError("Invalid file_id format")
-  file_id = match.group(1)
+
+  domain, arid = extract_arid_and_domain(file_id)
+  if domain is None:
+    domain = baw_domain
+
+  if domain not in BAW_DOMAINS:
+    raise ValueError(f"Invalid domain: {domain}. Valid domains are: {BAW_DOMAINS}")
+
   offset_s = int(offset_s)
   # See: https://api.staging.ecosounds.org/api-docs/index.html
-  audio_path = f"https://{baw_domain}/audio_recordings/{file_id}/media.flac"
+  audio_path = f"https://{domain}/audio_recordings/{arid}/media.flac"
   if offset_s <= 0 and window_size_s <= 0:
     return audio_path
   params = {}
@@ -59,6 +67,24 @@ def make_baw_audio_url_from_file_id(
     params["end_offset"] = offset_s + int(window_size_s)
   audio_path = audio_path + "?" + urllib.parse.urlencode(params)
   return audio_path
+
+def extract_arid_and_domain(file_id: str) -> tuple[str, str]:
+  """Extract the domain and recording ID from a full recording url or a canonical file name."""
+  match = FULL_RECORDING_PATTERN.match(file_id)
+  if match:
+    domain = match.group(1)
+    arid = int(match.group(2))  # Convert arid to an integer
+    return domain, arid
+  
+  match = FILE_ID_TO_UID_PATTERN.match(file_id)
+  if match:
+    domain = None
+    arid = int(match.group(1))  # Convert arid to an integer
+    return domain, arid
+
+  if not match:
+    raise ValueError(f"Invalid file_id format: {file_id}")
+  
 
 
 def load_baw_audio(

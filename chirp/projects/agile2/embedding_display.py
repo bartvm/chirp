@@ -20,9 +20,11 @@ import functools
 from typing import Callable, Iterator, Sequence
 
 from chirp import audio_utils
+from chirp.inference import baw_utils
 from chirp.models import frontend
 from chirp.projects.hoplite import interface
 from chirp.projects.hoplite import search_results
+
 import IPython
 from IPython.display import clear_output
 from IPython.display import display as ipy_display
@@ -336,9 +338,18 @@ class EmbeddingDisplayGroup:
 
     filepaths = [m.uri for m in needs_audio_targets]
     offsets = [m.offset_s for m in needs_audio_targets]
-    audio_iter_ = audio_utils.multi_load_audio_window(
-        filepaths, offsets, self.audio_loader
-    )
+    
+    if (self.baw_config is None):
+      audio_iter_ = audio_utils.multi_load_audio_window(
+          filepaths, offsets, self.audio_loader
+      )
+    else:
+      audio_iter_ = baw_utils.multi_load_baw_audio(
+          filepaths=[baw_utils.make_baw_audio_url_from_file_id(fp, offset, 5.0, self.baw_config['domain']) for fp, offset in zip(filepaths, offsets)],
+          offsets=offsets,
+          auth_token=self.baw_config['auth_token'],
+      )
+
     for member, is_dispatched in zip(targets, needs_audio):
       if is_dispatched:
         got_audio = next(audio_iter_)
