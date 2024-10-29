@@ -32,6 +32,7 @@ from chirp.projects.hoplite import brutalism
 from chirp.projects.hoplite import score_functions
 from chirp.projects.hoplite import sqlite_impl
 from chirp.projects.zoo import models
+from chirp.projects.zoo import model_configs
 import chirp.projects.agile2.convert_legacy as convert_legacy
 
 import ipywidgets as widgets
@@ -105,7 +106,7 @@ class agile2_state:
     self.db = sqlite_impl.SQLiteGraphSearchDB.create(self.config.db_path)
     self.db_model_config = self.db.get_metadata('model_config')
     self.embed_config = self.db.get_metadata('embed_config')
-    self.model_class = models.model_class_map()[self.db_model_config.model_key]
+    self.model_class = model_configs.MODEL_CLASS_MAP[self.db_model_config.model_key]
     self.embedding_model = self.model_class.from_config(self.db_model_config.model_config)
     num_embeddings = self.db.count_embeddings()
     print(f'DB initialized with {num_embeddings} embeddings.')
