@@ -142,6 +142,7 @@ def convert_parquet(
     dataset_name: str,
     max_count: int = -1,
     prefetch: int = 128,
+    source_map_fn = lambda x: x,
     **kwargs,
 ):
   """
@@ -154,6 +155,8 @@ def convert_parquet(
   @param db_type str; type of DB to create, sqlite or in_mem
   @param dataset_name str; name of the dataset (the database can contain multiple datasets)
   @param max_count int; maximum number of embeddings to convert
+  @param prefetch int; number of elements to prefetch
+  @param source_map_fn function; optionally modify the source before inserting into the DB
   """
   
   parquet_filepaths = [f for f in Path(parquet_folder).rglob('*.parquet')]
@@ -163,6 +166,7 @@ def convert_parquet(
         df = pd.read_parquet(fp)
         embeddings_table = df_to_embeddings(df)
         embeddings, filename, timestamp_s, embedding_shape = extract_metadata(embeddings_table)
+        filename = source_map_fn(filename)
         yield {
             'filename': filename.encode(),
             'timestamp_s': timestamp_s,
