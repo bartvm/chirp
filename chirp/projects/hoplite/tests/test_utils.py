@@ -20,6 +20,7 @@ from chirp.projects.hoplite import graph_utils
 from chirp.projects.hoplite import in_mem_impl
 from chirp.projects.hoplite import interface
 from chirp.projects.hoplite import sqlite_impl
+from chirp.projects.hoplite import sqlite_usearch_impl
 from ml_collections import config_dict
 import numpy as np
 
@@ -43,9 +44,18 @@ def make_db(
         db_path=os.path.join(path, 'db.sqlite'),
         embedding_dim=embedding_dim,
     )
+  elif db_type == 'sqlite_usearch':
+    usearch_cfg = config_dict.ConfigDict()
+    usearch_cfg.embedding_dim = embedding_dim
+    usearch_cfg.metric_name = 'IP'
+    usearch_cfg.expansion_add = 256
+    usearch_cfg.expansion_search = 128
+    usearch_cfg.dtype = 'float16'
+    db = sqlite_usearch_impl.SQLiteUsearchDB.create(
+        db_path=path, usearch_cfg=usearch_cfg
+    )
   else:
     raise ValueError(f'Unknown db type: {db_type}')
-  db.setup()
   # Insert a few embeddings...
   graph_utils.insert_random_embeddings(db, embedding_dim, num_embeddings, rng)
   config = config_dict.ConfigDict()

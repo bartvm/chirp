@@ -87,7 +87,6 @@ def convert_tfdataset(
     )
   else:
     raise ValueError(f'Unknown db type: {db_type}')
-  db.setup()
 
   # Convert embedding config to new format and insert into the DB.
 

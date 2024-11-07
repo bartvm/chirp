@@ -12,7 +12,7 @@ license = "Apache 2.0"
 # See: https://python-poetry.org/docs/managing-dependencies/#dependency-groups
 python = ">=3.10,<3.12"
 absl-py = "^1.4.0"
-ai-edge-litert-nightly = "^1.0.0"
+ai-edge-litert = "^1.0.0"
 apache-beam = {version = "^2.50.0", extras = ["gcp"]}
 clu = "^0.0.9"
 flax = "^0.8.1"
@@ -32,6 +32,7 @@ numba = "^0.57"
 librosa = "^0.10.1"
 numpy = "^1.24.0"
 tqdm = "^4.6"
+usearch = "^2.15"
 ipywidgets = "^8.1"
 
 [tool.poetry.group.nonwindows]

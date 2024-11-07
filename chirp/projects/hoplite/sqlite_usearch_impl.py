@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SQLite Implementation of a searchable embeddings database."""
+"""SQLite hoplite impliementation using usearch for vector storage."""
 
 import collections
 from collections.abc import Sequence
@@ -23,53 +23,135 @@ import sqlite3
 from typing import Any
 
 from chirp.projects.hoplite import interface
+from etils import epath
 from ml_collections import config_dict
 import numpy as np
+from usearch import index as uindex
 
+
+USEARCH_CONFIG_KEY = 'usearch_config'
 EMBEDDINGS_TABLE = 'hoplite_embeddings'
 EDGES_TABLE = 'hoplite_edges'
 
+HOPLITE_FILENAME = 'hoplite.sqlite'
+UINDEX_FILENAME = 'usearch.index'
+
+USEARCH_DTYPES = {
+    'float16': uindex.ScalarKind.F16,
+}
+
 
 @dataclasses.dataclass
-class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
-  """SQLite implementation of graph search database."""
+class SQLiteUsearchDB(interface.GraphSearchDBInterface):
+  """SQLite hoplite database, using USearch for vector storage.
 
-  db: sqlite3.Connection
+  USearch provides both indexing for approximate nearest neighbor search and
+  fast disk-based random access to vectors for the complete database.
+
+  To handle this, we maintain two USearch indexes:
+  1. An in-memory index, which is used when adding new embeddings.
+  2. A disk-based index, which is used for random access to the entire database.
+
+  We leave the in-memory index unpopulated until a new embedding is added,
+  preferring to use the disk-based index. Once an embedding is added, the
+  in-memory index is populated and used for all subsequent operations. On
+  commit, the in-memory index is persisted to disk.
+
+  Attributes:
+    db_path: The path to the database file.
+    db: The sqlite3 database connection.
+    ui: The USearch index. Points to either _ui_mem or _ui_disk_view, depending
+      on whether new embeddings have been added.
+    _ui_mem: The in-memory USearch index used for building the index.
+    _ui_disk_view: A disk view of the USearch index.
+    embedding_dim: The dimension of the embeddings.
+    embedding_dtype: The data type of the embeddings.
+    _cursor: The sqlite3 cursor.
+  """
+
+  # User-provided.
   db_path: str
+
+  # Instantiated during creation.
+  db: sqlite3.Connection
+  ui: uindex.Index
+  _ui_mem: uindex.Index
+  _ui_disk_view: uindex.Index
+
+  # Obtained from the usearch_cfg.
   embedding_dim: int
   embedding_dtype: type[Any] = np.float16
+
+  # Dynamic state.
   _cursor: sqlite3.Cursor | None = None
 
   @classmethod
   def create(
       cls,
       db_path: str,
-      embedding_dim: int | None = None,
-      embedding_dtype: type[Any] = np.float16,
+      usearch_cfg: config_dict.ConfigDict | None = None,
   ):
-    db = sqlite3.connect(db_path)
+    db_path = epath.Path(db_path)
+    db_path.mkdir(parents=True, exist_ok=True)
+    hoplite_path = db_path / HOPLITE_FILENAME
+    db = sqlite3.connect(hoplite_path.as_posix())
     cursor = db.cursor()
     cursor.execute('PRAGMA journal_mode=WAL;')  # Enable WAL mode
     _setup_sqlite_tables(cursor)
     db.commit()
 
-    if embedding_dim is None:
-      # Get an embedding from the DB to check its dimension.
-      cursor = db.cursor()
-      cursor.execute("""SELECT embedding FROM hoplite_embeddings LIMIT 1;""")
-      try:
-        embedding = cursor.fetchall()[0][0]
-      except IndexError as exc:
-        raise ValueError(
-            'Must specify embedding dimension for empty databases.'
-        ) from exc
-      embedding = deserialize_embedding(embedding, embedding_dtype)
-      embedding_dim = embedding.shape[-1]
-    return SQLiteGraphSearchDB(db, db_path, embedding_dim, embedding_dtype)
+    # TODO(tomdenton): Check that config is consistent with the DB.
+    metadata = _get_metadata(cursor, None)
+    if (USEARCH_CONFIG_KEY in metadata
+        and usearch_cfg is not None
+        and metadata[USEARCH_CONFIG_KEY] != usearch_cfg):
+      raise ValueError(
+          'A usearch_cfg was provided, but one already exists in the DB.')
+    elif USEARCH_CONFIG_KEY in metadata:
+      usearch_cfg = metadata[USEARCH_CONFIG_KEY]
+    elif usearch_cfg is None:
+      raise ValueError('No usearch config found in DB and none provided.')
+    else:
+      _insert_metadata(cursor, USEARCH_CONFIG_KEY, usearch_cfg)
+      db.commit()
+
+    usearch_dtype = USEARCH_DTYPES[usearch_cfg.dtype]
+    ui_mem = uindex.Index(
+        ndim=usearch_cfg.embedding_dim,
+        metric=getattr(uindex.MetricKind, usearch_cfg.metric_name),
+        expansion_add=usearch_cfg.expansion_add,
+        expansion_search=usearch_cfg.expansion_search,
+        dtype=usearch_dtype,
+    )
+    index_path = db_path / UINDEX_FILENAME
+    ui_disk_view = uindex.Index(ndim=usearch_cfg.embedding_dim)
+    if index_path.exists():
+      ui_disk_view.view(index_path.as_posix())
+      ui = ui_disk_view
+    else:
+      ui = ui_mem
+
+    return SQLiteUsearchDB(
+        db_path=db_path.as_posix(),
+        db=db,
+        ui=ui,
+        _ui_mem=ui_mem,
+        _ui_disk_view=ui_disk_view,
+        embedding_dim=usearch_cfg.embedding_dim,
+        embedding_dtype=usearch_cfg.dtype,
+    )
+
+  @property
+  def _sqlite_filepath(self) -> epath.Path:
+    return epath.Path(self.db_path) / HOPLITE_FILENAME
+
+  @property
+  def _usearch_filepath(self) -> epath.Path:
+    return epath.Path(self.db_path) / UINDEX_FILENAME
 
   def thread_split(self):
     """Get a new instance of the SQLite DB."""
-    return self.create(self.db_path, self.embedding_dtype)
+    return self.create(self.db_path)
 
   def _get_cursor(self) -> sqlite3.Cursor:
     if self._cursor is None:
@@ -87,6 +169,13 @@ class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
 
   def commit(self) -> None:
     self.db.commit()
+    if self._cursor is not None:
+      self._cursor.close()
+      self._cursor = None
+    if self.ui.size > self._ui_disk_view.size:
+      # We have added something to the in-memory index, so persist to disk.
+      # This check is sufficient because the index is strictly additive.
+      self.ui.save(self._usearch_filepath.as_posix())
 
   def vacuum_db(self) -> None:
     """Clears out the WAL log and defragments data."""
@@ -99,6 +188,8 @@ class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
     self.db = sqlite3.connect(self.db_path)
 
   def get_embedding_ids(self) -> np.ndarray:
+    # Note that USearch can also create a list of all keys, but it seems
+    # quite slow.
     cursor = self._get_cursor()
     cursor.execute("""SELECT id FROM hoplite_embeddings;""")
     return np.array(tuple(int(c[0]) for c in cursor.fetchall()))
@@ -122,24 +213,8 @@ class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
 
   def get_metadata(self, key: str | None) -> config_dict.ConfigDict:
     """Get a key-value pair from the metadata table."""
-    if key is None:
-      cursor = self._get_cursor()
-      cursor.execute("""SELECT key, data FROM hoplite_metadata;""")
-      return config_dict.ConfigDict(
-          {k: json.loads(v) for k, v in cursor.fetchall()}
-      )
-
     cursor = self._get_cursor()
-    cursor.execute(
-        """
-      SELECT data FROM hoplite_metadata WHERE key = ?;
-    """,
-        (key,),
-    )
-    result = cursor.fetchone()
-    if result is None:
-      raise KeyError(f'Metadata key not found: {key}')
-    return config_dict.ConfigDict(json.loads(result[0]))
+    return _get_metadata(cursor, key)
 
   def get_dataset_names(self) -> tuple[str, ...]:
     """Get all dataset names in the database."""
@@ -215,40 +290,39 @@ class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
     if embedding.shape[-1] != self.embedding_dim:
       raise ValueError('Incorrect embedding dimension.')
     cursor = self._get_cursor()
-    embedding_bytes = serialize_embedding(embedding, self.embedding_dtype)
     source_id = self._get_source_id(
         source.dataset_name, source.source_id, insert=True
     )
     offset_bytes = serialize_embedding(source.offsets, self.embedding_dtype)
     cursor.execute(
         """
-      INSERT INTO hoplite_embeddings (embedding, source_idx, offsets) VALUES (?, ?, ?);
+      INSERT INTO hoplite_embeddings (source_idx, offsets) VALUES (?, ?);
     """,
-        (embedding_bytes, source_id, offset_bytes),
+        (source_id, offset_bytes),
     )
-    embedding_id = cursor.lastrowid
-    return int(embedding_id)
+    embedding_id = int(cursor.lastrowid)
+
+    if self._ui_mem.size == 0 and self._ui_disk_view.size > 0:
+      # We need to load the disk view into memory.
+      self._ui_mem.load(self._usearch_filepath.as_posix())
+      self.ui = self._ui_mem
+
+    self.ui.add(embedding_id, embedding.astype(self.embedding_dtype))
+    return embedding_id
 
   def count_embeddings(self) -> int:
     """Counts the number of hoplite_embeddings in the 'embeddings' table."""
-    cursor = self._get_cursor()
-    cursor.execute('SELECT COUNT(*) FROM hoplite_embeddings;')
-    result = cursor.fetchone()
-    return result[0]  # Extract the count from the result tuple
+    return self.ui.size
 
   def embedding_dimension(self) -> int:
     return self.embedding_dim
 
-  def get_embedding(self, embedding_id: int):
-    cursor = self._get_cursor()
-    cursor.execute(
-        """
-      SELECT embedding FROM hoplite_embeddings WHERE id = ?;
-    """,
-        (int(embedding_id),),
-    )
-    embedding = cursor.fetchall()[0][0]
-    return deserialize_embedding(embedding, self.embedding_dtype)
+  def get_embedding(self, embedding_id: int) -> np.ndarray:
+    contains = self.ui.contains(embedding_id)
+    if not np.all(contains):
+      raise ValueError(f'Embeddings {embedding_id} not found.')
+    emb = self.ui.get(embedding_id)
+    return np.array(emb)
 
   def get_embedding_source(
       self, embedding_id: int
@@ -270,22 +344,11 @@ class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
   def get_embeddings(
       self, embedding_ids: np.ndarray
   ) -> tuple[np.ndarray, np.ndarray]:
-    placeholders = ', '.join('?' * embedding_ids.shape[0])
-    query = (
-        'SELECT id, embedding FROM hoplite_embeddings WHERE id IN '
-        f'({placeholders}) ORDER BY id;'
-    )
-    cursor = self._get_cursor()
-    results = cursor.execute(
-        query, tuple(int(c) for c in embedding_ids)
-    ).fetchall()
-    result_ids = np.array(tuple(int(c[0]) for c in results))
-    embeddings = np.array(
-        tuple(
-            deserialize_embedding(c[1], self.embedding_dtype) for c in results
-        )
-    )
-    return result_ids, embeddings
+    contains = self.ui.contains(embedding_ids)
+    if not np.all(contains):
+      raise ValueError(f'Embeddings {embedding_ids[~contains]} not found.')
+    embs = self.ui.get(embedding_ids)
+    return embedding_ids, np.array(embs)
 
   def get_embeddings_by_source(
       self,
@@ -448,10 +511,18 @@ class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
 
 
 def _setup_sqlite_tables(cursor: sqlite3.Cursor) -> None:
-  """ "Create all needed tables in the SQLite database."""
+  """Create the needed tables in the SQLite databse.
+
+  This is similar to the basice SQLite implementation, but we do not need an
+  edges table because the USearch index is self-contained. We also do not need
+  to store the embedding in the embeddings table, though we do still need a
+  mapping of embedding ID to source ID and offsets.
+
+  Args:
+    cursor: The SQLite cursor to use.
+  """
   cursor.execute("""
-      SELECT name FROM sqlite_master
-      WHERE type='table' AND name='hoplite_labels';
+  SELECT name FROM sqlite_master WHERE type='table' AND name='hoplite_labels';
   """)
   if cursor.fetchone() is not None:
     return
@@ -465,11 +536,10 @@ def _setup_sqlite_tables(cursor: sqlite3.Cursor) -> None:
       );
   """)
 
-  # Create embeddings table
+  # Create embeddings table for joining embeddings with sources.
   cursor.execute("""
       CREATE TABLE IF NOT EXISTS hoplite_embeddings (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
-          embedding BLOB NOT NULL,
           source_idx INTEGER NOT NULL,
           offsets BLOB NOT NULL,
           FOREIGN KEY (source_idx) REFERENCES hoplite_sources(id)
@@ -522,6 +592,40 @@ def _setup_sqlite_tables(cursor: sqlite3.Cursor) -> None:
   cursor.execute("""
   CREATE INDEX IF NOT EXISTS idx_label ON hoplite_labels (embedding_id, label);
   """)
+
+
+def _insert_metadata(
+    cursor: sqlite3.Cursor, key: str, value: config_dict.ConfigDict
+):
+  """Insert a key-value pair into the metadata table."""
+  json_coded = value.to_json()
+  cursor.execute(
+      """
+    INSERT INTO hoplite_metadata (key, data) VALUES (?, ?)
+    ON CONFLICT (key) DO UPDATE SET data = excluded.data;
+  """,
+      (key, json_coded),
+  )
+
+
+def _get_metadata(cursor: sqlite3.Cursor, key: str | None):
+  """Retrieve metadata from the SQLite database."""
+  if key is None:
+    cursor.execute("""SELECT key, data FROM hoplite_metadata;""")
+    return config_dict.ConfigDict(
+        {k: json.loads(v) for k, v in cursor.fetchall()}
+    )
+
+  cursor.execute(
+      """
+    SELECT data FROM hoplite_metadata WHERE key = ?;
+  """,
+      (key,),
+  )
+  result = cursor.fetchone()
+  if result is None:
+    raise KeyError(f'Metadata key not found: {key}')
+  return config_dict.ConfigDict(json.loads(result[0]))
 
 
 def serialize_embedding(
