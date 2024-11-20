@@ -146,6 +146,7 @@ def convert_tfdataset(
 
 def convert_parquet(
     parquet_folder: str,
+    parquet_filepaths: list,
     db_type: str,
     dataset_name: str,
     max_count: int = -1,
@@ -167,8 +168,11 @@ def convert_parquet(
   @param source_map_fn function; optionally modify the source before inserting into the DB
   """
   
-  parquet_filepaths = [f for f in Path(parquet_folder).rglob('*.parquet')]
-  
+  if parquet_filepaths is None:
+    print("Collectiong embeddings files...")
+    parquet_filepaths = [f for f in Path(parquet_folder).rglob('*.parquet')]
+    print("Found ", len(parquet_filepaths), " embeddings files.")
+
   def generator():
     for fp in parquet_filepaths:
         df = pd.read_parquet(fp)
@@ -190,11 +194,11 @@ def convert_parquet(
   }
 
   # debug only
-  for item in generator():
-    print("Generator first item: ")
-    for key, value in item.items():
-      print(key, ": ", value)
-    break
+  # for item in generator():
+  #   print("Generator first item: ")
+  #   for key, value in item.items():
+  #     print(key, ": ", value)
+  #   break
     
   ds = tf.data.Dataset.from_generator(generator, output_signature=output_signature)
   ds = ds.prefetch(prefetch)

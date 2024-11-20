@@ -81,7 +81,6 @@ class agile2_state:
   config: agile2_config = None
   db: sqlite_impl.SQLiteGraphSearchDB = None
   db_model_config = None
-  embed_config = None
   model_class = None
   embedding_model = None
   audio_filepath_loader = None
@@ -97,24 +96,35 @@ class agile2_state:
 
   def __init__(self, config):
     self.config = config
-    self.init_db()
-    self.init_loader()
 
+
+  def initialize(self):
+    self.init_db()
 
   def init_db(self):
     print('Initializing DB...')
     self.db = sqlite_impl.SQLiteGraphSearchDB.create(self.config.db_path)
     self.db_model_config = self.db.get_metadata('model_config')
-    self.embed_config = self.db.get_metadata('embed_config')
+    
     self.model_class = model_configs.MODEL_CLASS_MAP[self.db_model_config.model_key]
     self.embedding_model = self.model_class.from_config(self.db_model_config.model_config)
     num_embeddings = self.db.count_embeddings()
     print(f'DB initialized with {num_embeddings} embeddings.')
 
+    #TODO: This is a hack to get the audio loader to be created even when it's not used.  
+    # seems that embed config metadata is not inserted during legacy conversion. 
+    # it's wrapped in the legacy_config object instead. 
+    # In the case of ecosounds recordings, this filepath loader is not really used, but
+    # it needs to exist to pass to the display_group object.
 
-  def init_loader(self):
+    try:
+      embed_config = self.db.get_metadata('embed_config')
+    except KeyError:
+      embed_config = config_dict.ConfigDict()
+      embed_config.audio_globs = ['**/*.wav']
+
     self.audio_filepath_loader = audio_loader.make_filepath_loader(
-      audio_globs=self.embed_config.audio_globs,
+      audio_globs=embed_config.audio_globs,
       window_size_s=self.embedding_model.window_size_s,
       sample_rate_hz=self.embedding_model.sample_rate,
     )
@@ -248,14 +258,25 @@ class agile2_state:
     specified. If it does allows the user to delete and then creates the database. 
     """
 
+    from tqdm import tqdm
+
     db_path = Path(self.config.db_path)
 
     def create_db():
 
+      if (Path(embeddings_files) / 'filelist.json').exists():
+        parquet_filepaths = [Path(embeddings_files) / 'embeddings' / Path(str(f['site_id'])) / Path(str(f['id'])) / 'embeddings.parquet' 
+                         for f in json.load(open(Path(embeddings_files) / 'filelist.json'))]
+      else:
+        parquet_filepaths = None
+
       print(f'creating db at {db_path.resolve()}')
-      db = convert_legacy.convert_parquet(embeddings_files, "sqlite", 
-                                  self.config.search_dataset_name, max_count=10000, 
-                                  db_path=db_path)
+      db = convert_legacy.convert_parquet(parquet_folder = Path(embeddings_files),
+                                          parquet_filepaths = parquet_filepaths, 
+                                          db_type = "sqlite", 
+                                          dataset_name = self.config.search_dataset_name, 
+                                          max_count=10000, 
+                                          db_path=db_path)
 
     if db_path.exists():
 
@@ -273,3 +294,41 @@ class agile2_state:
     else:
       create_db()
 
+
+def download_embeddings(dataset_name, embeddings_dir):
+    """
+    Downloads a zip file from a url based on the dataset_name and extracts it to the embeddings_dir
+    Shows progress for both download and extraction
+    """
+    import requests
+    import zipfile
+    from pathlib import Path
+    from tqdm import tqdm
+    
+    url = f'https://api.ecosounds.org/system/esa2024/{dataset_name}/embeddings.zip'
+    zip_path = Path(embeddings_dir) / f"{dataset_name}.zip"
+    
+    # Download with progress bar
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    
+    with open(zip_path, 'wb') as file, tqdm(
+        desc=f'Downloading {dataset_name}',
+        total=total_size,
+        unit='iB',
+        unit_scale=True,
+        unit_divisor=1024,
+    ) as pbar:
+        for data in response.iter_content(chunk_size=1024):
+            size = file.write(data)
+            pbar.update(size)
+    
+    # Extract with progress bar
+    with zipfile.ZipFile(zip_path) as zf:
+        for member in tqdm(zf.infolist(), desc=f'Extracting {dataset_name}'):
+            zf.extract(member, embeddings_dir)
+    
+    # Optionally remove zip after extraction
+    # zip_path.unlink()
+    
+    return Path(embeddings_dir) / Path(dataset_name)
