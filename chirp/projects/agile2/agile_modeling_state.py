@@ -40,13 +40,29 @@ from IPython.display import display
 
 @dataclass
 class agile2_config:
-  db_path: str
-  annotator_id: str
-  baw_config: dict
-  search_dataset_name: str
-  embeddings_files: str = None
 
-  def from_json(self, json_path):
+  # path to the sqlite db containing the embeddings
+  db_path: str
+
+  # annotator id to attach to labels
+  annotator_id: str
+
+  # config for the baw api 
+  baw_config: dict
+
+  # name of the dataset in the database we are working with
+  search_dataset_name: str
+
+  # path to the embeddings files to create the database from
+  embeddings_folder: str = None
+
+  # path to labeled examples
+  labeled_examples_folder: str = None
+
+  # max number of embeddings to load from the embeddings_folder
+  max_embeddings_count: int = -1
+
+  def from_json(self, json_path = "./agile_config.json"):
     # read a json file and populate the dataclass properties from that
 
     if not Path(json_path).exists():
@@ -56,17 +72,17 @@ class agile2_config:
       if not Path(path).is_absolute():
         path = Path(json_path).parent / Path(path)
       return path
-
+    
     with open(json_path, 'r') as f:
       # paths in config is relative to the working directory, 
       # paths in json config is relative to the json file
       data = json.load(f)
-      self.db_path = resolve_path(data['db_path'])
-      self.annotator_id = data['annotator_id']
-      self.baw_config = data['baw_config']
-      self.search_dataset_name = data['search_dataset_name']
-      if 'embeddings_files' in data:
-        self.embeddings_files = resolve_path(data['embeddings_files'])
+      paths_to_resolve = ['db_path', 'embeddings_folder', 'labeled_examples_folder']
+      for key, value in data.items():
+        if key in paths_to_resolve:
+          value = resolve_path(value)
+        setattr(self, key, value)
+
       self.check()
 
 
@@ -258,9 +274,8 @@ class agile2_state:
     specified. If it does allows the user to delete and then creates the database. 
     """
 
-    from tqdm import tqdm
-
     db_path = Path(self.config.db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def create_db():
 
@@ -270,12 +285,17 @@ class agile2_state:
       else:
         parquet_filepaths = None
 
+      if self.config.max_embeddings_count:
+        max_count = self.config.max_embeddings_count
+      else:
+        max_count = -1
+
       print(f'creating db at {db_path.resolve()}')
       db = convert_legacy.convert_parquet(parquet_folder = Path(embeddings_files),
                                           parquet_filepaths = parquet_filepaths, 
                                           db_type = "sqlite", 
                                           dataset_name = self.config.search_dataset_name, 
-                                          max_count=10000, 
+                                          max_count=max_count, 
                                           db_path=db_path)
 
     if db_path.exists():
@@ -304,6 +324,17 @@ def download_embeddings(dataset_name, embeddings_dir):
     import zipfile
     from pathlib import Path
     from tqdm import tqdm
+
+    embeddings_dir = Path(embeddings_dir)
+    embeddings_dir.mkdir(parents=True, exist_ok=True)
+
+    #dowload config.json
+    url = f'https://api.ecosounds.org/system/esa2024/embedding_config.json'
+    config_path = Path(embeddings_dir) / "config.json"
+    response = requests.get(url)
+    with open(config_path, 'wb') as file:
+        file.write(response.content)
+
     
     url = f'https://api.ecosounds.org/system/esa2024/{dataset_name}/embeddings.zip'
     zip_path = Path(embeddings_dir) / f"{dataset_name}.zip"
@@ -330,5 +361,21 @@ def download_embeddings(dataset_name, embeddings_dir):
     
     # Optionally remove zip after extraction
     # zip_path.unlink()
+
+
     
     return Path(embeddings_dir) / Path(dataset_name)
+
+class Helpers:
+
+  @staticmethod
+  def list_audio_files(path, recursive=True, extensions=(".wav", ".flac", ".mp3")):
+      path = Path(path)
+      files = path.rglob("*") if recursive else path.glob("*")
+      audio_files = [
+          f for f in files 
+          if f.is_file()
+          and f.suffix.lower() in extensions
+          and not f.name.startswith(".")
+      ]
+      return audio_files
