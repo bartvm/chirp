@@ -144,20 +144,20 @@ def convert_tfdataset(
   return db
 
 
+
+
 def convert_parquet(
     parquet_folder: str,
-    parquet_filepaths: list,
     db_type: str,
     dataset_name: str,
+    parquet_filepaths: list,
     max_count: int = -1,
     prefetch: int = 128,
     source_map_fn = lambda x: x,
     **kwargs,
 ):
   """
-  Convert a folder of parquet embeddings files into a TF dataset 
-  so it can be converted to a hoplite DB.
-
+  Convert a list of parquet files into a TF dataset so it can be converted to a hoplite DB.
   Requires a config json file in the parquet folder in the same format as the TF record config.
 
   @param parquet_folder str; path to the folder containing the parquet files
@@ -169,22 +169,33 @@ def convert_parquet(
   """
   
   if parquet_filepaths is None:
-    print("Collectiong embeddings files...")
+    print("Collecting embeddings files...")
     parquet_filepaths = [f for f in Path(parquet_folder).rglob('*.parquet')]
     print("Found ", len(parquet_filepaths), " embeddings files.")
 
   def generator():
     for fp in parquet_filepaths:
-        df = pd.read_parquet(fp)
-        embeddings_table = df_to_embeddings(df)
-        embeddings, filename, timestamp_s, embedding_shape = extract_metadata(embeddings_table)
-        filename = source_map_fn(filename)
-        yield {
-            'filename': filename.encode(),
-            'timestamp_s': timestamp_s,
-            'embedding': embeddings,
-            'embedding_shape': embedding_shape
-        }
+        try:
+            df = pd.read_parquet(fp)
+            embeddings_table = df_to_embeddings(df)
+            embeddings, filename, timestamp_s, embedding_shape = extract_metadata(embeddings_table)
+            filename = source_map_fn(filename)
+            yield {
+                'filename': filename.encode(),
+                'timestamp_s': timestamp_s,
+                'embedding': embeddings,
+                'embedding_shape': embedding_shape
+            }
+        except pd.errors.ParquetError as e:
+            print(f"Parquet error on {fp}: {e}")
+            continue
+        except ValueError as e:
+            print(f"Value error on {fp}: {e}")
+            continue
+        except Exception as e:
+            print(f"Unexpected error on {fp}: {e}")
+            continue
+      
     
   output_signature = {
       'filename': tf.TensorSpec(shape=(), dtype=tf.string),

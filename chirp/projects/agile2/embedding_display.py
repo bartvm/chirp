@@ -338,16 +338,16 @@ class EmbeddingDisplayGroup:
 
     filepaths = [m.uri for m in needs_audio_targets]
     offsets = [m.offset_s for m in needs_audio_targets]
-    
-    if (self.baw_config is None):
-      audio_iter_ = audio_utils.multi_load_audio_window(
-          filepaths, offsets, self.audio_loader
-      )
-    else:
+        
+    if hasattr(self, 'baw_config') and self.baw_config is not None:
       audio_iter_ = baw_utils.multi_load_baw_audio(
           filepaths=[baw_utils.make_baw_audio_url_from_file_id(fp, offset, 5.0, self.baw_config['domain']) for fp, offset in zip(filepaths, offsets)],
           offsets=offsets,
           auth_token=self.baw_config['auth_token'],
+      )
+    else:
+      audio_iter_ = audio_utils.multi_load_audio_window(
+          filepaths, offsets, self.audio_loader
       )
 
     for member, is_dispatched in zip(targets, needs_audio):
