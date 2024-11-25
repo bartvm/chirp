@@ -120,8 +120,9 @@ def convert_tfdataset(
   db.insert_metadata('audio_sources', audio_sources.to_config_dict())
   db.insert_metadata('model_config', model_config.to_config_dict())
   hop_size_s = model_config.model_config.hop_size_s
-
-  for ex in tqdm.tqdm(ds.as_numpy_iterator()):
+  
+  total_size = ds.cardinality().numpy()
+  for ex in tqdm.tqdm(ds.as_numpy_iterator(), total=total_size):
     embs = ex['embedding']
     flat_embeddings = np.reshape(embs, [-1, embs.shape[-1]])
     file_id = str(ex['filename'], 'utf8')

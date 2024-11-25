@@ -42,16 +42,16 @@ from IPython.display import display
 class agile2_config:
 
   # path to the sqlite db containing the embeddings
-  db_path: str
+  db_path: str = None
 
   # annotator id to attach to labels
-  annotator_id: str
+  annotator_id: str = None
 
   # config for the baw api 
-  baw_config: dict
+  baw_config: dict = None
 
   # name of the dataset in the database we are working with
-  search_dataset_name: str
+  search_dataset_name: str = None
 
   # path to the embeddings files to create the database from
   embeddings_folder: str = None
@@ -146,15 +146,22 @@ class agile2_state:
     )
 
 
-  def embed_query(self, query_uri):
+  def display_query(self, query_uri):
+    """
+    Displays the query audio so that the user can select the 5s window to embed
+    """
+    self.query_display = embedding_display.QueryDisplay(
+      uri=query_uri, offset_s=0.0, window_size_s=5.0, sample_rate_hz=32000)
+    _ = self.query_display.display_interactive()
+
+  
+  def embed_query(self):
     """
     Embeds a single query audio clip allowing the user to select the 5s window within the specified source
     """
-    query = embedding_display.QueryDisplay(
-      uri=query_uri, offset_s=0.0, window_size_s=5.0, sample_rate_hz=32000)
-    _ = query.display_interactive()
-    self.query_embedding = self.embedding_model.embed(query.get_audio_window()).embeddings[0, 0]
-  
+
+    self.query_embedding = self.embedding_model.embed(self.query_display.get_audio_window()).embeddings[0, 0]
+
 
   def search_with_query(self, query_label, num_results=50, sample_size=1_000_000, target_score=None):
     self.search(
@@ -338,21 +345,23 @@ def download_embeddings(dataset_name, embeddings_dir):
     
     url = f'https://api.ecosounds.org/system/esa2024/{dataset_name}/embeddings.zip'
     zip_path = Path(embeddings_dir) / f"{dataset_name}.zip"
+
+    download_file(url, zip_path, description=f'Downloading {dataset_name}')
     
-    # Download with progress bar
-    response = requests.get(url, stream=True)
-    total_size = int(response.headers.get('content-length', 0))
+    # # Download with progress bar
+    # response = requests.get(url, stream=True)
+    # total_size = int(response.headers.get('content-length', 0))
     
-    with open(zip_path, 'wb') as file, tqdm(
-        desc=f'Downloading {dataset_name}',
-        total=total_size,
-        unit='iB',
-        unit_scale=True,
-        unit_divisor=1024,
-    ) as pbar:
-        for data in response.iter_content(chunk_size=1024):
-            size = file.write(data)
-            pbar.update(size)
+    # with open(zip_path, 'wb') as file, tqdm(
+    #     desc=f'Downloading {dataset_name}',
+    #     total=total_size,
+    #     unit='iB',
+    #     unit_scale=True,
+    #     unit_divisor=1024,
+    # ) as pbar:
+    #     for data in response.iter_content(chunk_size=1024):
+    #         size = file.write(data)
+    #         pbar.update(size)
     
     # Extract with progress bar
     with zipfile.ZipFile(zip_path) as zf:
@@ -365,6 +374,123 @@ def download_embeddings(dataset_name, embeddings_dir):
 
     
     return Path(embeddings_dir) / Path(dataset_name)
+
+
+
+def download_file(url: str, dest: str | Path, max_retries: int = 5, description: str = None) -> bool:
+    """
+    Download a file from a URL to a destination path with progress bar and resume capability.
+    
+    Args:
+        url: URL to download from
+        dest: Destination path (string or Path object)
+        max_retries: Maximum number of retry attempts (default: 5)
+        description: Optional description for the progress bar. If None, uses filename
+    
+    Returns:
+        bool: True if download was successful
+    
+    Raises:
+        Exception: If download fails after all retries
+    """
+
+    import requests
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    from tqdm import tqdm
+    import time
+
+    dest = Path(dest)
+    description = description or dest.name
+    
+    # Set up retry strategy
+    retry_strategy = Retry(
+        total=max_retries,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    
+    # Configure session
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': '*/*',
+        'Accept-Encoding': 'gzip, deflate'
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            # Check file size and resume support
+            head = session.head(url, headers=headers)
+            total_size = int(head.headers.get('content-length', 0))
+            supports_resume = 'accept-ranges' in head.headers
+            
+            existing_size = 0
+            if dest.exists():
+                existing_size = dest.stat().st_size
+                if existing_size == total_size:
+                    print(f"File already completely downloaded ({existing_size} bytes)")
+                    return True
+                elif supports_resume and existing_size < total_size:
+                    print(f"Resuming download from byte {existing_size}")
+                    headers['Range'] = f'bytes={existing_size}-'
+                else:
+                    print("Cannot resume download - starting from beginning")
+                    existing_size = 0
+            
+            # Create parent directories if they don't exist
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Download with progress bar
+            response = session.get(
+                url,
+                stream=True,
+                headers=headers,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            mode = 'ab' if existing_size else 'wb'
+            chunk_size = 8 * 1024 * 1024  # 8MB chunks
+            
+            with open(dest, mode) as file, tqdm(
+                desc=description,
+                total=total_size,
+                unit='iB',
+                unit_scale=True,
+                unit_divisor=1024,
+                initial=existing_size
+            ) as pbar:
+                for data in response.iter_content(chunk_size=chunk_size):
+                    size = file.write(data)
+                    pbar.update(size)
+            
+            # Verify complete download
+            if dest.stat().st_size == total_size:
+                print("Download completed successfully")
+                return True
+            else:
+                print(f"Download incomplete, retrying... (Attempt {attempt + 1}/{max_retries})")
+                time.sleep(2)
+                continue
+                
+        except (requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ReadTimeout) as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"Download failed, retrying in {wait_time} seconds... (Attempt {attempt + 1}/{max_retries})")
+                print(f"Error: {str(e)}")
+                time.sleep(wait_time)
+                continue
+            else:
+                raise Exception(f"Failed to download after {max_retries} attempts: {str(e)}")
+    
+    raise Exception("Download failed after all retry attempts")
 
 class Helpers:
 
