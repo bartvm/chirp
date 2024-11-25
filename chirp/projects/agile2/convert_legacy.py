@@ -123,7 +123,6 @@ def convert_tfdataset(
 
   for ex in tqdm.tqdm(ds.as_numpy_iterator()):
     embs = ex['embedding']
-    print(embs.shape)
     flat_embeddings = np.reshape(embs, [-1, embs.shape[-1]])
     file_id = str(ex['filename'], 'utf8')
     offset_s = ex['timestamp_s']
@@ -186,12 +185,6 @@ def convert_parquet(
                 'embedding': embeddings,
                 'embedding_shape': embedding_shape
             }
-        except pd.errors.ParquetError as e:
-            print(f"Parquet error on {fp}: {e}")
-            continue
-        except ValueError as e:
-            print(f"Value error on {fp}: {e}")
-            continue
         except Exception as e:
             print(f"Unexpected error on {fp}: {e}")
             continue

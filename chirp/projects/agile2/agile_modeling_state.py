@@ -305,8 +305,8 @@ class agile2_state:
       button = widgets.Button(description="Delete Existing Database and create it again?")
       def on_button_click(b):
           db_path.unlink()
-          (db_path.parent / Path(self.config.db_path.name + "-shm")).unlink()
-          (db_path.parent / Path(self.config.db_path.name + "-wal")).unlink()
+          (db_path.parent / Path(db_path.name + "-shm")).unlink()
+          (db_path.parent / Path(db_path.name + "-wal")).unlink()
           create_db()
       button.on_click(on_button_click)
       display(button)
