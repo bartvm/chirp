@@ -150,7 +150,7 @@ def convert_parquet(
     parquet_folder: str,
     db_type: str,
     dataset_name: str,
-    parquet_filepaths: list,
+    parquet_filepaths: list = None,
     max_count: int = -1,
     prefetch: int = 128,
     source_map_fn = lambda x: x,
