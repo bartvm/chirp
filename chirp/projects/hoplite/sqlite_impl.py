@@ -98,9 +98,21 @@ class SQLiteGraphSearchDB(interface.GraphSearchDBInterface):
     self.db.close()
     self.db = sqlite3.connect(self.db_path)
 
-  def get_embedding_ids(self) -> np.ndarray:
+  def get_embedding_ids(self, dataset=None) -> np.ndarray:
     cursor = self._get_cursor()
-    cursor.execute("""SELECT id FROM hoplite_embeddings;""")
+    if dataset is not None:
+      cursor.execute(
+        """
+        SELECT e.id 
+        FROM hoplite_embeddings e
+        JOIN hoplite_sources s ON s.id = e.source_idx
+        WHERE s.dataset = ?
+        """,
+          (dataset,),
+      )
+    else:
+      cursor.execute("""SELECT id FROM hoplite_embeddings;""")
+    
     return np.array(tuple(int(c[0]) for c in cursor.fetchall()))
 
   def get_one_embedding_id(self) -> int:

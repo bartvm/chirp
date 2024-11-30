@@ -42,6 +42,7 @@ def make_baw_audio_url_from_file_id(
     offset_s: float,
     window_size_s: float,
     baw_domain: str = "api.acousticobservatory.org",
+    extension: str = "flac",
 ) -> str:
   """Construct an baw audio URL."""
   # Extract the recording UID. Example:
@@ -52,12 +53,28 @@ def make_baw_audio_url_from_file_id(
   if domain is None:
     domain = baw_domain
 
-  if domain not in BAW_DOMAINS:
-    raise ValueError(f"Invalid domain: {domain}. Valid domains are: {BAW_DOMAINS}")
+  return make_baw_audio_url_from_arid(
+      arid=arid,
+      offset_s=offset_s,
+      window_size_s=window_size_s,
+      baw_domain=domain,
+      extension=extension
+  )
+
+def make_baw_audio_url_from_arid(
+    arid: str,
+    offset_s: float,
+    window_size_s: float,
+    baw_domain: str = "api.acousticobservatory.org",
+    extension: str = "flac",
+) -> str:
+  
+  if baw_domain not in BAW_DOMAINS:
+    raise ValueError(f"Invalid domain: {baw_domain}. Valid domains are: {BAW_DOMAINS}")
 
   offset_s = int(offset_s)
   # See: https://api.staging.ecosounds.org/api-docs/index.html
-  audio_path = f"https://{domain}/audio_recordings/{arid}/media.flac"
+  audio_path = f"https://{baw_domain}/audio_recordings/{arid}/media.{extension}"
   if offset_s <= 0 and window_size_s <= 0:
     return audio_path
   params = {}
@@ -67,6 +84,8 @@ def make_baw_audio_url_from_file_id(
     params["end_offset"] = offset_s + int(window_size_s)
   audio_path = audio_path + "?" + urllib.parse.urlencode(params)
   return audio_path
+  
+
 
 def extract_arid_and_domain(file_id: str) -> tuple[str, str]:
   """Extract the domain and recording ID from a full recording url or a canonical file name."""

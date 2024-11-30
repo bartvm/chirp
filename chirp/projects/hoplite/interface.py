@@ -134,7 +134,7 @@ class GraphSearchDBInterface(abc.ABC):
     """Get all dataset names in the database."""
 
   @abc.abstractmethod
-  def get_embedding_ids(self) -> np.ndarray:
+  def get_embedding_ids(self, dataset: str=None) -> np.ndarray:
     # TODO(tomdenton): Make this return an iterator, with optional shuffling.
     """Get all embedding IDs in the database."""
 

@@ -46,6 +46,7 @@ def threaded_brute_search(
     max_workers: int = 8,
     sample_size: int | float | None = None,
     rng_seed: int | None = None,
+    dataset = None,
 ) -> tuple[search_results.TopKSearchResults, np.ndarray]:
   """Performs a brute-force search for neighbors of the query embedding.
 
@@ -79,7 +80,7 @@ def threaded_brute_search(
       initializer=worker_initializer,
       initargs=(state,),
   ) as executor:
-    ids = get_brute_search_ids(db, sample_size, rng_seed)
+    ids = get_brute_search_ids(db, sample_size, rng_seed, dataset=dataset)
     futures = []
     for q in range(0, ids.shape[0], batch_size):
       futures.append(
@@ -107,6 +108,7 @@ def brute_search(
     score_fn: Callable[[np.ndarray, np.ndarray], float],
     sample_size: int | float | None = None,
     rng_seed: int | None = None,
+    dataset = None,
 ) -> tuple[search_results.TopKSearchResults, np.ndarray]:
   """Performs a brute-force search for neighbors of the query embedding.
 
@@ -126,7 +128,7 @@ def brute_search(
   """
   results = search_results.TopKSearchResults(search_list_size)
   all_scores = []
-  ids = get_brute_search_ids(db, sample_size, rng_seed)
+  ids = get_brute_search_ids(db, sample_size, rng_seed, dataset=dataset)
   for idx in ids:
     target_embedding = db.get_embedding(idx)
     score = score_fn(query_embedding, target_embedding)
@@ -143,9 +145,10 @@ def get_brute_search_ids(
     db: interface.GraphSearchDBInterface,
     sample_size: int | float | None = None,
     rng_seed: int | None = None,
+    dataset = None,
 ):
   """Get IDs for brute force search, subsampling as needed."""
-  ids = db.get_embedding_ids()
+  ids = db.get_embedding_ids(dataset=dataset)
   if sample_size is None:
     return ids
   if isinstance(sample_size, float):

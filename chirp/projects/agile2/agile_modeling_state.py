@@ -20,10 +20,12 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import numpy as np
+import pandas as pd
 
 from matplotlib import pyplot as plt
 from ml_collections import config_dict
 
+from chirp import audio_utils
 from chirp.projects.agile2 import audio_loader
 from chirp.projects.agile2 import classifier
 from chirp.projects.agile2 import classifier_data
@@ -34,6 +36,8 @@ from chirp.projects.hoplite import sqlite_impl
 from chirp.projects.zoo import models
 from chirp.projects.zoo import model_configs
 import chirp.projects.agile2.convert_legacy as convert_legacy
+
+import chirp.inference.baw_utils as baw_utils
 
 import ipywidgets as widgets
 from IPython.display import display
@@ -163,6 +167,46 @@ class agile2_state:
     self.query_embedding = self.embedding_model.embed(self.query_display.get_audio_window()).embeddings[0, 0]
 
 
+  def add_labeled_examples(self, labeled_examples_folder, label, dataset_name, sample_rate_hz = 32000):
+    """
+    Adds labeled examples to the database from a folder containing audio files
+    """
+
+    window_size_s = 5.0
+
+    labeled_examples_folder = Path(labeled_examples_folder)
+    labeled_examples = Helpers.list_audio_files(labeled_examples_folder)
+
+    for example_source in labeled_examples:
+
+      print(f'Adding {label} example to db:{dataset_name}: {example_source}')
+
+      audio = audio_utils.load_audio(example_source, sample_rate_hz)
+      # choose the middle 5s of the audio
+      start = int(max(len(audio)//2 - sample_rate_hz * window_size_s // 2, 0))
+      end = int(start + sample_rate_hz * window_size_s) # python handles index past the end
+      audio = audio[start: end]
+  
+      embedding = self.embedding_model.embed(audio).embeddings[0, 0]
+      self.add_query_to_db(dataset_name, embedding, example_source, label)
+      print('done')
+      
+     
+
+
+  def add_query_to_db(self, dataset_name, embedding, source, query_label):
+     
+     #TOOD: do we also need to add the config, so that it can construct a full path from config
+     # base path and file id?
+     source = str(source)
+     from chirp.projects.hoplite import interface
+     source = interface.EmbeddingSource(dataset_name=dataset_name, source_id=source, offsets=np.array(0.0))
+     embedding_id = self.db.insert_embedding(embedding, source)
+     label = interface.Label(embedding_id, query_label, type = interface.LabelType.POSITIVE, provenance=self.config.annotator_id)
+     self.db.insert_label(label, skip_duplicates=True)
+     self.db.commit()
+
+
   def search_with_query(self, query_label, num_results=50, sample_size=1_000_000, target_score=None):
     self.search(
         query=self.query_embedding,
@@ -172,7 +216,7 @@ class agile2_state:
     self.display_search_results(query_label)
 
 
-  def search(self, query, bias=0.0, num_results=50, sample_size=1_000_000, target_score=None):
+  def search(self, query, bias=0.0, num_results=50, sample_size=1_000_000, target_score=None, dataset=None):
     """
     Searches the db using a query or model
     query: np.array of shape (embedding_dim,) (the result of self.embedding_model.embed())
@@ -182,7 +226,7 @@ class agile2_state:
     score_fn = score_functions.get_score_fn('dot', bias=bias, target_score=target_score)
     results, all_scores = brutalism.threaded_brute_search(
         self.db, query, num_results, score_fn=score_fn,
-        sample_size=sample_size)
+        sample_size=sample_size, dataset=dataset)
     self.search_results = results
     self.all_search_scores = all_scores
 
@@ -206,7 +250,6 @@ class agile2_state:
     prev_lbls, new_lbls = 0, 0
     for lbl in self.display_group.harvest_labels(self.config.annotator_id):
       row_count = self.db.insert_label(lbl, skip_duplicates=True)
-      print(f'cursor.rowcount: {row_count}')
       check = True
       new_lbls += check
       prev_lbls += (1 - check)
@@ -257,20 +300,58 @@ class agile2_state:
     self.classifier_params = params
     self.classifier_eval_scores = eval_scores
 
+    self.wrapped_classifier = {
+       'params': params,
+       'eval_scores': params,
+       'labels': self.data_manager.get_target_labels(),
+    }
+
+  def save_search_results(self, path, append=False):
+    rows = []
+    for res in self.search_results.search_results:
+      source = self.db.get_embedding_source(res.embedding_id)
+      domain, arid = baw_utils.extract_arid_and_domain(source.source_id)
+      offset = float(source.offsets[0])
+      audio_url = baw_utils.make_baw_audio_url_from_arid(arid, offset, 5.0, domain)
+      #source = self.db.get_source(embedding.source_id)
+      row = {
+        'embedding_id': res.embedding_id,
+        'arid': arid,
+        'offset': offset,
+        'score': res.sort_score,
+        'link': audio_url
+      }
+      rows.append(row)
+
+    df = pd.DataFrame(rows)
+
+    if append:
+      df.to_csv(path, mode='a', header=False, index=False)
+    else:
+      df.to_csv(path, index=False)
+
+
+       
+
+
+
 
   def search_with_classifier(self,
-      target_label, num_results=50, sample_size=1_000_000, target_score=None):
-    
+      target_label, num_results=50, sample_size=1_000_000, target_score=None, dataset=None):
+    target_labels = self.data_manager.get_target_labels()
+    print('target_labels: ', target_labels)
     target_label_idx = self.data_manager.get_target_labels().index(target_label)
     class_query = self.classifier_params['beta'][:, target_label_idx]
     bias = self.classifier_params['beta_bias'][target_label_idx]
+    
 
     self.search(
         query=class_query,
         bias=bias,
         num_results=num_results,
         sample_size=sample_size,
-        target_score=target_score)
+        target_score=target_score, 
+        dataset=dataset)
     
     self.display_search_results(target_label)
 
@@ -321,6 +402,10 @@ class agile2_state:
     else:
       create_db()
 
+  def save_classifier(self, path):
+    with open(path, 'w') as f:
+      json.dump(self.wrapped_classifier, f)
+
 
 def download_embeddings(dataset_name, embeddings_dir):
     """
@@ -347,31 +432,14 @@ def download_embeddings(dataset_name, embeddings_dir):
     zip_path = Path(embeddings_dir) / f"{dataset_name}.zip"
 
     download_file(url, zip_path, description=f'Downloading {dataset_name}')
-    
-    # # Download with progress bar
-    # response = requests.get(url, stream=True)
-    # total_size = int(response.headers.get('content-length', 0))
-    
-    # with open(zip_path, 'wb') as file, tqdm(
-    #     desc=f'Downloading {dataset_name}',
-    #     total=total_size,
-    #     unit='iB',
-    #     unit_scale=True,
-    #     unit_divisor=1024,
-    # ) as pbar:
-    #     for data in response.iter_content(chunk_size=1024):
-    #         size = file.write(data)
-    #         pbar.update(size)
-    
+
     # Extract with progress bar
     with zipfile.ZipFile(zip_path) as zf:
         for member in tqdm(zf.infolist(), desc=f'Extracting {dataset_name}'):
             zf.extract(member, embeddings_dir)
     
     # Optionally remove zip after extraction
-    # zip_path.unlink()
-
-
+    zip_path.unlink()
     
     return Path(embeddings_dir) / Path(dataset_name)
 
@@ -504,4 +572,5 @@ class Helpers:
           and f.suffix.lower() in extensions
           and not f.name.startswith(".")
       ]
+      #print("\n".join([f"{i}: {f}" for i, f in enumerate(audio_files)]))
       return audio_files
