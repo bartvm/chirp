@@ -21,6 +21,9 @@ import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import requests
+import zipfile
+from tqdm import tqdm
 
 from matplotlib import pyplot as plt
 from ml_collections import config_dict
@@ -62,6 +65,12 @@ class agile2_config:
 
   # path to labeled examples
   labeled_examples_folder: str = None
+  
+  # path to the folder where we will save the classifiers
+  models_folder: str = None
+
+  # path to the folder where we will save the inference results
+  predictions_folder: str = None
 
   # max number of embeddings to load from the embeddings_folder
   max_embeddings_count: int = -1
@@ -76,7 +85,7 @@ class agile2_config:
       if not Path(path).is_absolute():
         path = Path(json_path).parent / Path(path)
       return path
-    
+        
     with open(json_path, 'r') as f:
       # paths in config is relative to the working directory, 
       # paths in json config is relative to the json file
@@ -87,7 +96,25 @@ class agile2_config:
           value = resolve_path(value)
         setattr(self, key, value)
 
-      self.check()
+    self.check()
+    self.show_config()
+
+  def show_config(self, conf_dict=None, depth=0):
+    if depth == 0:
+      print(f'Config:')
+    if conf_dict is None:
+      conf_dict = self.__dict__
+    
+    for key, value in conf_dict.items():
+      # if value is a dict, recurse
+      if isinstance(value, dict):
+        print(f'{key}:')
+        self.show_config(value, depth+1)
+      else:
+        if key in ['auth_token']:
+          # replace all but the 1st and last characters with *
+          value = value[0] + '*' * (len(value) - 2) + value[-1]
+        print(f'{key}: {value}')
 
 
   def check(self):
@@ -150,10 +177,25 @@ class agile2_state:
     )
 
 
-  def display_query(self, query_uri):
+  def display_query(self, query_uri: str | int): 
     """
     Displays the query audio so that the user can select the 5s window to embed
     """
+
+    query_uri = str(query_uri)
+
+    # if the query is a path relative to the self.conifg.labeled_examples_folder, resolve its full path
+    if (self.config.labeled_examples_folder / Path(query_uri)).exists():
+      query_uri = self.config.labeled_examples_folder / Path(query_uri)
+
+    # if the query is an integer it's an index into the list of audio files in the labeled_examples_folder
+    elif str(query_uri).isdigit():
+      file_list =  Helpers.list_audio_files(self.config.labeled_examples_folder, quiet=True)
+      if int(query_uri) < len(file_list):
+        query_uri = file_list[int(query_uri)]
+      else:
+        raise ValueError(f'Index {query_uri} is out of range of the labeled examples folder')
+       
     self.query_display = embedding_display.QueryDisplay(
       uri=query_uri, offset_s=0.0, window_size_s=5.0, sample_rate_hz=32000)
     _ = self.query_display.display_interactive()
@@ -207,13 +249,15 @@ class agile2_state:
      self.db.commit()
 
 
-  def search_with_query(self, query_label, num_results=50, sample_size=1_000_000, target_score=None):
+  def search_with_query(self, num_results=50, sample_size=1_000_000, target_score=None):
     self.search(
         query=self.query_embedding,
         num_results=num_results,
         sample_size=sample_size,
-        target_score=target_score)
-    self.display_search_results(query_label)
+        target_score=target_score,
+        dataset=self.config.search_dataset_name)
+   
+
 
 
   def search(self, query, bias=0.0, num_results=50, sample_size=1_000_000, target_score=None, dataset=None):
@@ -235,9 +279,12 @@ class agile2_state:
     hit_scores = [r.sort_score for r in results.search_results]
     plt.scatter(hit_scores, np.zeros_like(hit_scores), marker='|',
                 color='r', alpha=0.5)
+    plt.show()
 
 
   def display_search_results(self, query_label):
+    
+    plt.figure() 
     self.display_group = embedding_display.EmbeddingDisplayGroup.from_search_results(
         self.search_results, self.db, sample_rate_hz=32000, frame_rate=100,
         audio_loader=self.audio_filepath_loader)
@@ -263,16 +310,14 @@ class agile2_state:
                        target_labels=None,
                        learning_rate = 1e-3,
                        weak_neg_weight = 0.05,
-                       l2_mu = 0.000,
                        num_steps = 128,
                        train_ratio = 0.9,
                        batch_size = 128,
-                       weak_negatives_batch_size = 128,
-                       loss_fn_name = 'bce'):
+                       weak_negatives_batch_size = 128):
 
 
 
-    self.data_manager = classifier_data.AgileDataManager(
+    data_manager = classifier_data.AgileDataManager(
         target_labels=target_labels,
         db=self.db,
         train_ratio=train_ratio,
@@ -281,14 +326,12 @@ class agile2_state:
         weak_negatives_batch_size=weak_negatives_batch_size,
         rng=np.random.default_rng(seed=5))
     print('Training for target labels : ')
-    print(self.data_manager.get_target_labels())
-    params, eval_scores = classifier.train_linear_classifier(
-        data_manager=self.data_manager,
+    print(data_manager.get_target_labels())
+    linear_classifier, eval_scores = classifier.train_linear_classifier(
+        data_manager=data_manager,
         learning_rate=learning_rate,
         weak_neg_weight=weak_neg_weight,
-        l2_mu=l2_mu,
         num_train_steps=num_steps,
-        loss_name=loss_fn_name,
     )
     print('\n' + '-' * 80)
     top1 = eval_scores['top1_acc']
@@ -297,14 +340,16 @@ class agile2_state:
     print(f'roc_auc    {rocauc:.3f}')
     cmap = eval_scores['cmap']
     print(f'cmap       {cmap:.3f}')
-    self.classifier_params = params
-    self.classifier_eval_scores = eval_scores
+    # self.classifier_params = params
+    # self.classifier_eval_scores = eval_scores
 
-    self.wrapped_classifier = {
-       'params': params,
-       'eval_scores': params,
-       'labels': self.data_manager.get_target_labels(),
-    }
+    self.classifier = linear_classifier
+
+    # self.wrapped_classifier = {
+    #    'params': params,
+    #    'eval_scores': params,
+    #    'labels': data_manager.get_target_labels(),
+    # }
 
   def save_search_results(self, path, append=False):
     rows = []
@@ -338,11 +383,11 @@ class agile2_state:
 
   def search_with_classifier(self,
       target_label, num_results=50, sample_size=1_000_000, target_score=None, dataset=None):
-    target_labels = self.data_manager.get_target_labels()
+    target_labels = self.classifier.classes
     print('target_labels: ', target_labels)
-    target_label_idx = self.data_manager.get_target_labels().index(target_label)
-    class_query = self.classifier_params['beta'][:, target_label_idx]
-    bias = self.classifier_params['beta_bias'][target_label_idx]
+    target_label_idx = target_labels.index(target_label)
+    class_query = self.classifier.beta[:, target_label_idx]
+    bias = self.classifier.beta_bias[target_label_idx]
     
 
     self.search(
@@ -353,7 +398,7 @@ class agile2_state:
         target_score=target_score, 
         dataset=dataset)
     
-    self.display_search_results(target_label)
+ 
 
 
   def create_database(self, embeddings_files):
@@ -385,12 +430,14 @@ class agile2_state:
                                           dataset_name = self.config.search_dataset_name, 
                                           max_count=max_count, 
                                           db_path=db_path)
+      print(f'db created at {db_path.resolve()} with {db.count_embeddings()} embeddings.')
 
     if db_path.exists():
 
       print(f"DB path already exists at {db_path.resolve()}.")
 
-      button = widgets.Button(description="Delete Existing Database and create it again?")
+      button = widgets.Button(description="Delete Existing Database and create it again?",
+                              layout=widgets.Layout(width='auto'))
       def on_button_click(b):
           db_path.unlink()
           (db_path.parent / Path(db_path.name + "-shm")).unlink()
@@ -402,9 +449,17 @@ class agile2_state:
     else:
       create_db()
 
+
   def save_classifier(self, path):
-    with open(path, 'w') as f:
-      json.dump(self.wrapped_classifier, f)
+     Path(path).parent.mkdir(parents=True, exist_ok=True)
+     self.classifier.save(path)
+     
+
+  def run_inference(self, output_filepath, threshold=0.0, labels=None, dataset=None):
+     Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
+     classifier.write_inference_csv(self.classifier, self.db, output_filepath, threshold, labels, dataset)
+     
+    
 
 
 def download_embeddings(dataset_name, embeddings_dir):
@@ -412,36 +467,84 @@ def download_embeddings(dataset_name, embeddings_dir):
     Downloads a zip file from a url based on the dataset_name and extracts it to the embeddings_dir
     Shows progress for both download and extraction
     """
-    import requests
-    import zipfile
-    from pathlib import Path
-    from tqdm import tqdm
+
+    def has_embeddings(directory):
+        directory = Path(directory)
+        # Return True as soon as we find any .pt file
+        try:
+            next(directory.glob('**/*.parquet'))
+            return True
+        except StopIteration:
+            return False
+     
+    def do_download():
+        
+        embeddings_dir.mkdir(parents=True, exist_ok=True)
+
+        #dowload config.json
+        url = f'https://api.ecosounds.org/system/esa2024/embedding_config.json'
+        config_path = Path(embeddings_dir) / "config.json"
+        response = requests.get(url)
+        with open(config_path, 'wb') as file:
+            file.write(response.content)
+        
+        url = f'https://api.ecosounds.org/system/esa2024/{dataset_name}/embeddings.zip'
+        
+        download_file(url, zip_path, description=f'Downloading {dataset_name}')
+
+    def do_unzip():
+
+        # Extract with progress bar
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in tqdm(zf.infolist(), desc=f'Extracting {dataset_name}'):
+                zf.extract(member, embeddings_dir)
+        
+        # Optionally remove zip after extraction
+        zip_path.unlink()
+
+    def do_download_and_unzip():
+        do_download()
+        do_unzip()
+
+
+
+    def download_again_button():
+        button1 = widgets.Button(description="Download again and overwrite existing embeddings?",
+                                 layout=widgets.Layout(width='auto'))
+        button1.on_click(lambda b: do_download_and_unzip())
+        display(button1)
+
+    def unzip_again_button():
+        button2 = widgets.Button(description="Unzip existing downloaded file and overwrite embeddings?",
+                                 layout=widgets.Layout(width='auto'))
+        button2.on_click(lambda b: do_unzip())
+        display(button2)
+        
 
     embeddings_dir = Path(embeddings_dir)
-    embeddings_dir.mkdir(parents=True, exist_ok=True)
-
-    #dowload config.json
-    url = f'https://api.ecosounds.org/system/esa2024/embedding_config.json'
-    config_path = Path(embeddings_dir) / "config.json"
-    response = requests.get(url)
-    with open(config_path, 'wb') as file:
-        file.write(response.content)
-
-    
-    url = f'https://api.ecosounds.org/system/esa2024/{dataset_name}/embeddings.zip'
     zip_path = Path(embeddings_dir) / f"{dataset_name}.zip"
 
-    download_file(url, zip_path, description=f'Downloading {dataset_name}')
+    already_unzipped = has_embeddings(embeddings_dir)
+    already_downloaded = zip_path.exists()
 
-    # Extract with progress bar
-    with zipfile.ZipFile(zip_path) as zf:
-        for member in tqdm(zf.infolist(), desc=f'Extracting {dataset_name}'):
-            zf.extract(member, embeddings_dir)
-    
-    # Optionally remove zip after extraction
-    zip_path.unlink()
-    
-    return Path(embeddings_dir) / Path(dataset_name)
+    if already_unzipped:
+
+      print(f"Embeddings already downloaded and extracted at {embeddings_dir.resolve()}.")
+      download_again_button()
+
+      if already_downloaded:
+        # might happen if they unterrupt during unzip
+        unzip_again_button()
+
+    elif already_downloaded:
+      # don't think this can happen unless we change to not remove the zip after extraction
+      print(f"Embeddings already downloaded but not unzipped.")
+      unzip_again_button()
+
+    else:
+      do_download()
+      do_unzip()
+
 
 
 
@@ -563,7 +666,7 @@ def download_file(url: str, dest: str | Path, max_retries: int = 5, description:
 class Helpers:
 
   @staticmethod
-  def list_audio_files(path, recursive=True, extensions=(".wav", ".flac", ".mp3")):
+  def list_audio_files(path, recursive=True, quiet=False, extensions=(".wav", ".flac", ".mp3")):
       path = Path(path)
       files = path.rglob("*") if recursive else path.glob("*")
       audio_files = [
@@ -572,5 +675,10 @@ class Helpers:
           and f.suffix.lower() in extensions
           and not f.name.startswith(".")
       ]
-      #print("\n".join([f"{i}: {f}" for i, f in enumerate(audio_files)]))
+
+      if not quiet:
+          print(f"Found {len(audio_files)} audio files in {str(path)}")
+          print("\n".join([f"{i}: {f}" for i, f in enumerate(audio_files)]))
       return audio_files
+  
+

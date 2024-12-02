@@ -178,9 +178,12 @@ class InMemoryGraphSearchDB(interface.GraphSearchDBInterface):
   ) -> tuple[np.ndarray, np.ndarray]:
     return embedding_ids, self.embeddings[embedding_ids]
 
-  def get_embedding_ids(self) -> np.ndarray:
+  def get_embedding_ids(self, dataset=None) -> np.ndarray:
     """Get all embedding IDs in the database."""
-    return np.array(tuple(int(id_) for id_ in self.embedding_ids))
+    if dataset is None:
+      return np.array(tuple(int(id_) for id_ in self.embedding_ids))
+    else:
+      return self.get_embeddings_by_source(dataset, None)
 
   def get_one_embedding_id(self) -> int:
     return next(iter(self.embedding_ids))

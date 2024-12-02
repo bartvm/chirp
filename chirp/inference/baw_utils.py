@@ -34,15 +34,14 @@ FILE_ID_TO_UID_PATTERN = re.compile(r".*_(\d+).[^\.]+$")
 # regex to extract the domain and recording id from a full recording URL
 FULL_RECORDING_PATTERN = re.compile(r"https://(.+?)/audio_recordings/(\d+)/original")
 
-BAW_DOMAINS = ["api.acousticobservatory.org", "api.ecosounds.org", "api.staging.ecosounds.org"]
-
+BAW_DOMINS_ALLOWLIST = ["api.acousticobservatory.org", "api.ecosounds.org", "api.staging.ecosounds.org"]
 
 def make_baw_audio_url_from_file_id(
     file_id: str,
     offset_s: float,
     window_size_s: float,
     baw_domain: str = "api.acousticobservatory.org",
-    extension: str = "flac",
+    extension: str = "flac"
 ) -> str:
   """Construct an baw audio URL."""
   # Extract the recording UID. Example:
@@ -67,9 +66,10 @@ def make_baw_audio_url_from_arid(
     window_size_s: float,
     baw_domain: str = "api.acousticobservatory.org",
     extension: str = "flac",
+    check_baw_domains = False
 ) -> str:
-  
-  if baw_domain not in BAW_DOMAINS:
+  """Construct an baw media query URL."""
+  if check_baw_domains and baw_domain not in BAW_DOMINS_ALLOWLIST:
     raise ValueError(f"Invalid domain: {baw_domain}. Valid domains are: {BAW_DOMAINS}")
 
   offset_s = int(offset_s)
