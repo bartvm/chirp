@@ -127,9 +127,13 @@ def load_baw_audio(
   if session is None:
     # Use requests.get instead of session.get if no session is provided.
     session = requests
+  headers={}
+  if auth_token:
+    headers["Authorization"] = f"Token token={auth_token}"
+      
   audio_response = session.get(
       url=audio_url,
-      headers={"Authorization": f"Token token={auth_token}"},
+      headers=headers,
   )
   if not audio_response.ok:
     print(audio_response.status_code)
@@ -151,7 +155,7 @@ def load_baw_audio(
 def multi_load_baw_audio(
     filepaths: Sequence[str],
     offsets: Sequence[int],
-    auth_token: str,
+    auth_token: str = None,
     sample_rate: int = 32000,
     **kwargs,
 ) -> Generator[np.ndarray, None, None]:

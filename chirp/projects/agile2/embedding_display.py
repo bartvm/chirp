@@ -340,6 +340,8 @@ class EmbeddingDisplayGroup:
     offsets = [m.offset_s for m in needs_audio_targets]
         
     if hasattr(self, 'baw_config') and self.baw_config is not None:
+      if 'auth_token' not in self.baw_config:
+        self.baw_config['auth_token'] = None
       audio_iter_ = baw_utils.multi_load_baw_audio(
           filepaths=[baw_utils.make_baw_audio_url_from_file_id(fp, offset, 5.0, self.baw_config['domain']) for fp, offset in zip(filepaths, offsets)],
           offsets=offsets,

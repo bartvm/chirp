@@ -16,7 +16,7 @@
 """Wrapper class for agile modeling steps."""
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import numpy as np
@@ -36,6 +36,7 @@ from chirp.projects.agile2 import embedding_display
 from chirp.projects.hoplite import brutalism
 from chirp.projects.hoplite import score_functions
 from chirp.projects.hoplite import sqlite_impl
+from chirp.projects.hoplite import interface as hoplite_interface
 from chirp.projects.zoo import models
 from chirp.projects.zoo import model_configs
 import chirp.projects.agile2.convert_legacy as convert_legacy
@@ -55,10 +56,10 @@ class agile2_config:
   annotator_id: str = None
 
   # config for the baw api 
-  baw_config: dict = None
+  baw_config: dict = field(default_factory=dict)
 
   # name of the dataset in the database we are working with
-  search_dataset_name: str = None
+  search_dataset_name: str = 'search_dataset'
 
   # path to the embeddings files to create the database from
   embeddings_folder: str = None
@@ -79,7 +80,8 @@ class agile2_config:
     # read a json file and populate the dataclass properties from that
 
     if not Path(json_path).exists():
-      Warning(f'Config file {json_path} does not exist.')
+      Warning(f'Config file {json_path} does not exist. Config not loaded.')
+      return
 
     def resolve_path(path):
       if not Path(path).is_absolute():
@@ -241,10 +243,9 @@ class agile2_state:
      #TOOD: do we also need to add the config, so that it can construct a full path from config
      # base path and file id?
      source = str(source)
-     from chirp.projects.hoplite import interface
-     source = interface.EmbeddingSource(dataset_name=dataset_name, source_id=source, offsets=np.array(0.0))
+     source = hoplite_interface.EmbeddingSource(dataset_name=dataset_name, source_id=source, offsets=np.array(0.0))
      embedding_id = self.db.insert_embedding(embedding, source)
-     label = interface.Label(embedding_id, query_label, type = interface.LabelType.POSITIVE, provenance=self.config.annotator_id)
+     label = hoplite_interface.Label(embedding_id, query_label, type = hoplite_interface.LabelType.POSITIVE, provenance=self.config.annotator_id)
      self.db.insert_label(label, skip_duplicates=True)
      self.db.commit()
 
@@ -268,6 +269,10 @@ class agile2_state:
     """
 
     score_fn = score_functions.get_score_fn('dot', bias=bias, target_score=target_score)
+    all_datasets = self.db.get_dataset_names()
+    if dataset is not None and dataset not in all_datasets:
+      print(f'Dataset {dataset} not found in DB. Available datasets are {all_datasets}')
+      return
     results, all_scores = brutalism.threaded_brute_search(
         self.db, query, num_results, score_fn=score_fn,
         sample_size=sample_size, dataset=dataset)
@@ -303,6 +308,7 @@ class agile2_state:
     self.db.commit()
     print('\nnew_lbls: ', new_lbls)
     print('\nprev_lbls: ', prev_lbls)
+    self.print_label_counts()
     return prev_lbls, new_lbls
   
   
@@ -377,6 +383,19 @@ class agile2_state:
 
 
        
+  def print_label_counts(self, label=None):
+    
+    print('Label counts:')
+
+    positive = self.db.get_class_counts(hoplite_interface.LabelType.POSITIVE)
+    negative = self.db.get_class_counts(hoplite_interface.LabelType.NEGATIVE)
+    for lbl, count in positive.items():
+      print(f'{lbl}: {count} positive, {negative[lbl]} negative')
+
+
+
+
+     
 
 
 
@@ -422,6 +441,10 @@ class agile2_state:
         max_count = self.config.max_embeddings_count
       else:
         max_count = -1
+
+      if not self.config.search_dataset_name:
+        print('search_dataset_name not set in config. Please set it before creating the database.')
+        return
 
       print(f'creating db at {db_path.resolve()}')
       db = convert_legacy.convert_parquet(parquet_folder = Path(embeddings_files),
