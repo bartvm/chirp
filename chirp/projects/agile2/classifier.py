@@ -224,6 +224,7 @@ def write_inference_csv(
     threshold: float,
     labels: Sequence[str] | None = None,
     dataset: str | None = None,
+    row_func: Any = None,
 ):
   """Write a CSV for all audio windows with logits above a threshold.
 
@@ -234,6 +235,10 @@ def write_inference_csv(
     threshold: Logits must be above this value to be written.
     labels: If provided, only write logits for these labels. If None, write
       logits for all labels.
+    dataset: If provided, only write logits for embeddings from this dataset.
+    row_func: If provided, a function that returns additional columns to write. This function accepts an optional
+              argument, the row, and returns a list of values for additional columns. If the row is not provided, it will
+              return the header for the additional columns.
 
   Returns:
     None
@@ -248,7 +253,10 @@ def write_inference_csv(
   with open(output_filepath, 'w', newline='') as f:
       writer = csv.writer(f)
       # Write header
-      writer.writerow(['idx', 'dataset_name', 'source_id', 'offset', 'label', 'logits'])
+      header = ['idx', 'dataset_name', 'source_id', 'offset', 'label', 'logits']
+      if row_func is not None:
+          header += row_func()
+      writer.writerow(header)
       
       # Write data
       for idx in tqdm.tqdm(idxes):
@@ -265,23 +273,7 @@ def write_inference_csv(
                   lbl,
                   logits[a],
               ]
+              if row_func is not None:
+                  row += row_func(row)
               writer.writerow(row)
 
-
-  # with open(output_filepath, 'w') as f:
-  #   f.write('idx,dataset_name,source_id,offset,label,logits\n')
-  #   for idx in tqdm.tqdm(idxes):
-  #     source = db.get_embedding_source(idx)
-  #     emb = db.get_embedding(idx)
-  #     logits = logits_fn(emb)
-  #     for a in np.argwhere(logits > threshold):
-  #       lbl = labels[int(a)]
-  #       row = [
-  #           idx,
-  #           source.dataset_name,
-  #           source.source_id,
-  #           source.offsets[0],
-  #           lbl,
-  #           logits[a],
-  #       ]
-  #       f.write(','.join(map(str, row)) + '\n')

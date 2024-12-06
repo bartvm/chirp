@@ -158,7 +158,8 @@ class agile2_state:
     self.model_class = model_configs.MODEL_CLASS_MAP[self.db_model_config.model_key]
     self.embedding_model = self.model_class.from_config(self.db_model_config.model_config)
     num_embeddings = self.db.count_embeddings()
-    print(f'DB initialized with {num_embeddings} embeddings.')
+    #print(f'DB initialized with {num_embeddings} embeddings.')
+    self.db_summary()
 
     #TODO: This is a hack to get the audio loader to be created even when it's not used.  
     # seems that embed config metadata is not inserted during legacy conversion. 
@@ -250,13 +251,15 @@ class agile2_state:
      self.db.commit()
 
 
-  def search_with_query(self, num_results=50, sample_size=1_000_000, target_score=None):
+  def search_with_query(self, num_results=50, sample_size=1_000_000, target_score=None, dataset='from_config'):
+    if dataset == 'from_config':
+      dataset = self.config.search_dataset_name
     self.search(
         query=self.query_embedding,
         num_results=num_results,
         sample_size=sample_size,
         target_score=target_score,
-        dataset=self.config.search_dataset_name)
+        dataset=dataset)
    
 
 
@@ -351,13 +354,10 @@ class agile2_state:
 
     self.classifier = linear_classifier
 
-    # self.wrapped_classifier = {
-    #    'params': params,
-    #    'eval_scores': params,
-    #    'labels': data_manager.get_target_labels(),
-    # }
-
   def save_search_results(self, path, append=False):
+    """
+    saves the search results to a csv file
+    """
     rows = []
     for res in self.search_results.search_results:
       source = self.db.get_embedding_source(res.embedding_id)
@@ -382,22 +382,17 @@ class agile2_state:
       df.to_csv(path, index=False)
 
 
-       
-  def print_label_counts(self, label=None):
+  def print_label_counts(self, label: str=None):
     
-    print('Label counts:')
-
     positive = self.db.get_class_counts(hoplite_interface.LabelType.POSITIVE)
     negative = self.db.get_class_counts(hoplite_interface.LabelType.NEGATIVE)
-    for lbl, count in positive.items():
-      print(f'{lbl}: {count} positive, {negative[lbl]} negative')
-
-
-
-
-     
-
-
+    if (len(positive.items()) > 0):
+      print('Label counts:')
+      for lbl, count in positive.items():
+        if label is None or lbl == label:
+          print(f'{lbl}: {count} positive, {negative[lbl]} negative')
+    else:
+      print('No labeled embeddings in db.')
 
 
   def search_with_classifier(self,
@@ -408,7 +403,6 @@ class agile2_state:
     class_query = self.classifier.beta[:, target_label_idx]
     bias = self.classifier.beta_bias[target_label_idx]
     
-
     self.search(
         query=class_query,
         bias=bias,
@@ -418,8 +412,6 @@ class agile2_state:
         dataset=dataset)
     
  
-
-
   def create_database(self, embeddings_files):
     """
     Checks if a database already exists at the specified path, and if not, creates one from the files at the location
@@ -457,7 +449,7 @@ class agile2_state:
 
     if db_path.exists():
 
-      print(f"DB path already exists at {db_path.resolve()}.")
+      print(f"DB path already exists at {db_path.resolve()}. (Initialize the DB to see details)")
 
       button = widgets.Button(description="Delete Existing Database and create it again?",
                               layout=widgets.Layout(width='auto'))
@@ -473,14 +465,54 @@ class agile2_state:
       create_db()
 
 
-  def save_classifier(self, path):
-     Path(path).parent.mkdir(parents=True, exist_ok=True)
-     self.classifier.save(path)
+  def db_summary(self):
+    if not self.db:
+      print('DB not initialized.')
+      return
+    print('DB Summary:')
+    print(f'Number of embeddings: {self.db.count_embeddings()}')
+    datasets = self.db.get_dataset_names()
+    print(f'{len(datasets)} Dataset(s):')
+    for dataset in datasets:
+      #print(f'{dataset}: {len(self.db.get_embeddings_by_source(dataset_name=dataset, source_id=None))} embeddings')
+      print(f'{dataset}')
+    self.print_label_counts()
+
+
+
+  def save_classifier(self, path=None):
+    if path is None:
+      path = Path(self.config.models_folder) / 'classifier.json'
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    self.classifier.save(path)
      
 
-  def run_inference(self, output_filepath, threshold=0.0, labels=None, dataset=None):
-     Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
-     classifier.write_inference_csv(self.classifier, self.db, output_filepath, threshold, labels, dataset)
+  def run_inference(self, output_filepath=None, threshold=0.0, labels=None, dataset=None):
+    """
+    Calls the classifier.write_inference_csv() function to write the inference results to a csv file
+    injecting the site_id and link columns via a row_func that uses baw_utils and 
+    """
+    if output_filepath is None:
+      output_filepath = Path(self.config.predictions_folder) / 'inference.csv'
+    Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
+
+    filelist_path = Path(self.config.embeddings_folder) / 'filelist.json'
+    site_lookup = {}
+    if filelist_path.exists():
+      filelist = json.load(open(filelist_path))
+      site_lookup = {int(f['id']): f['site_id'] for f in filelist}
+    else:
+      print('filelist not found. site_id will not be included in the output.')
+
+    def row_func(row=None):
+      if row is None:
+        return ['link', 'site_id']
+      baw_domain, arid  = baw_utils.extract_arid_and_domain(row[2])
+      link = baw_utils.make_baw_listen_link_from_arid(arid, row[3], 5.0, baw_domain)
+      site_id = site_lookup.get(int(arid), '')
+      return [link, site_id]
+        
+    classifier.write_inference_csv(self.classifier, self.db, output_filepath, threshold, labels, dataset, row_func=row_func)
      
     
 
@@ -513,7 +545,7 @@ def download_embeddings(dataset_name, embeddings_dir):
         
         url = f'https://api.ecosounds.org/system/esa2024/{dataset_name}/embeddings.zip'
         
-        download_file(url, zip_path, description=f'Downloading {dataset_name}')
+        download_file(url, zip_path, description=f'Downloading {dataset_name} to {embeddings_dir}')
 
     def do_unzip():
 
@@ -537,8 +569,8 @@ def download_embeddings(dataset_name, embeddings_dir):
         button1.on_click(lambda b: do_download_and_unzip())
         display(button1)
 
-    def unzip_again_button():
-        button2 = widgets.Button(description="Unzip existing downloaded file and overwrite embeddings?",
+    def unzip_again_button(description="Unzip existing downloaded file and overwrite embeddings?"):
+        button2 = widgets.Button(description=description,
                                  layout=widgets.Layout(width='auto'))
         button2.on_click(lambda b: do_unzip())
         display(button2)
@@ -556,13 +588,18 @@ def download_embeddings(dataset_name, embeddings_dir):
       download_again_button()
 
       if already_downloaded:
-        # might happen if they unterrupt during unzip
+        # might happen if they unterrupt during unzip 
+        # or if they interrupt during download after already downloadin and unzipping
+        # (in this 2nd case thy probably don't want to unzip without downloading again)
         unzip_again_button()
 
     elif already_downloaded:
-      # don't think this can happen unless we change to not remove the zip after extraction
-      print(f"Embeddings already downloaded but not unzipped.")
-      unzip_again_button()
+      # This can happen if they interrupt during download. 
+      # (in this case they probably don't want to unzip without downloading)
+      # TODO: (phil) check if the zip is complete, e.g. comparing file size to the response headers
+      print(f"Embeddings already downloaded to {zip_path} but not unzipped.")
+      download_again_button()
+      unzip_again_button("Unzip existing downloaded file?")
 
     else:
       do_download()

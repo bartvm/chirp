@@ -191,7 +191,7 @@ class InMemoryGraphSearchDB(interface.GraphSearchDBInterface):
   def get_embeddings_by_source(
       self,
       dataset_name: str,
-      source_id: str | None,
+      source_id: str | None = None,
       offsets: np.ndarray | None = None,
   ) -> np.ndarray:
     found_idxes = set()

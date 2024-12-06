@@ -36,6 +36,12 @@ FULL_RECORDING_PATTERN = re.compile(r"https://(.+?)/audio_recordings/(\d+)/origi
 
 BAW_DOMINS_ALLOWLIST = ["api.acousticobservatory.org", "api.ecosounds.org", "api.staging.ecosounds.org"]
 
+# Bit of a hack to provide website listen links for BAW audio segments
+WEBSITE_DOMAIN_MAP = {
+    "api.acousticobservatory.org": "data.acousticobservatory.org",
+    "api.ecosounds.org": "www.ecosounds.org",
+}
+
 def make_baw_audio_url_from_file_id(
     file_id: str,
     offset_s: float,
@@ -70,7 +76,7 @@ def make_baw_audio_url_from_arid(
 ) -> str:
   """Construct an baw media query URL."""
   if check_baw_domains and baw_domain not in BAW_DOMINS_ALLOWLIST:
-    raise ValueError(f"Invalid domain: {baw_domain}. Valid domains are: {BAW_DOMAINS}")
+    raise ValueError(f"Invalid domain: {baw_domain}. Valid domains are: {BAW_DOMINS_ALLOWLIST}")
 
   offset_s = int(offset_s)
   # See: https://api.staging.ecosounds.org/api-docs/index.html
@@ -84,7 +90,33 @@ def make_baw_audio_url_from_arid(
     params["end_offset"] = offset_s + int(window_size_s)
   audio_path = audio_path + "?" + urllib.parse.urlencode(params)
   return audio_path
-  
+
+
+def make_baw_listen_link_from_arid(
+    arid: str,
+    offset_s: float,
+    window_size_s: float,
+    baw_domain: str = "data.acousticobservatory.org",
+    check_baw_domains = False
+) -> str:
+  """Construct an baw media query URL."""
+  if check_baw_domains and baw_domain not in BAW_DOMINS_ALLOWLIST:
+    raise ValueError(f"Invalid domain: {baw_domain}. Valid domains are: {BAW_DOMINS_ALLOWLIST}")
+
+  offset_s = int(offset_s)
+  # See: https://api.staging.ecosounds.org/api-docs/index.html
+  if baw_domain in WEBSITE_DOMAIN_MAP:
+    baw_domain = WEBSITE_DOMAIN_MAP[baw_domain]
+  audio_path = f"https://{baw_domain}/listen/{arid}/"
+  if offset_s <= 0 and window_size_s <= 0:
+    return audio_path
+  params = {}
+  if offset_s > 0:
+    params["start"] = offset_s
+  if window_size_s > 0:
+    params["end"] = offset_s + int(window_size_s)
+  audio_path = audio_path + "?" + urllib.parse.urlencode(params)
+  return audio_path
 
 
 def extract_arid_and_domain(file_id: str) -> tuple[str, str]:
