@@ -187,7 +187,7 @@ def train_linear_classifier(
       train_idxes, add_weak_negatives=True, repeat=True
   )
   progress = tqdm.tqdm(enumerate(train_iter_), total=num_train_steps)
-  update_steps = set([b * (num_train_steps // 100) for b in range(100)])
+  update_steps = set([int(b * num_train_steps / 100) for b in range(100)])
 
   for step, batch in enumerate(train_iter_):
     if step >= num_train_steps:
