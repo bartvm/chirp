@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
+import random
 import requests
 import zipfile
 from tqdm import tqdm
@@ -236,8 +237,6 @@ class agile2_state:
       self.add_query_to_db(dataset_name, embedding, example_source, label)
       print('done')
       
-     
-
 
   def add_query_to_db(self, dataset_name, embedding, source, query_label):
      
@@ -262,6 +261,34 @@ class agile2_state:
         dataset=dataset)
    
 
+  def show_labeled_examples(self, label, label_type=1, num=5, dataset_name=None):
+    """
+    Show a few random spectorgrams of labeled examples, largely for sanity-checking. 
+    """
+    
+    label_type = [
+      hoplite_interface.LabelType.NEGATIVE,
+      hoplite_interface.LabelType.POSITIVE
+    ][label_type]
+     
+    embedding_ids = self.db.get_embeddings_by_label(label, label_type)
+   
+    indices = sorted(random.sample(range(len(embedding_ids)), min(num, len(embedding_ids))))
+    embedding_ids = [embedding_ids[i] for i in indices]
+
+    display_group_members = []
+    for eid in embedding_ids:
+       source = self.db.get_embedding_source(eid)
+       emb_disp = embedding_display.EmbeddingDisplay(eid, 
+                                                     dataset_name, 
+                                                     source.source_id, 
+                                                     source.offsets[0], 0)
+       display_group_members.append(emb_disp)
+       edg = embedding_display.EmbeddingDisplayGroup.create(display_group_members, 
+                                                            sample_rate_hz=32000, 
+                                                            audio_loader=self.audio_filepath_loader)
+       edg.baw_config = self.config.baw_config
+       edg.display(positive_labels=[])
 
 
   def search(self, query, bias=0.0, num_results=50, sample_size=1_000_000, target_score=None, dataset=None):
@@ -291,6 +318,9 @@ class agile2_state:
 
 
   def display_search_results(self, query_label):
+    """
+    Displays the results in self.search_results (which come from either classifier or single query searching)
+    """
     
     plt.figure() 
     self.display_group = embedding_display.EmbeddingDisplayGroup.from_search_results(
@@ -304,8 +334,7 @@ class agile2_state:
   def save_labels(self):
     prev_lbls, new_lbls = 0, 0
     for lbl in self.display_group.harvest_labels(self.config.annotator_id):
-      row_count = self.db.insert_label(lbl, skip_duplicates=True)
-      check = True
+      check = self.db.insert_label(lbl, skip_duplicates=True)
       new_lbls += check
       prev_lbls += (1 - check)
     self.db.commit()
@@ -323,8 +352,6 @@ class agile2_state:
                        train_ratio = 0.9,
                        batch_size = 128,
                        weak_negatives_batch_size = 128):
-
-
 
     data_manager = classifier_data.AgileDataManager(
         target_labels=target_labels,
@@ -353,6 +380,7 @@ class agile2_state:
     # self.classifier_eval_scores = eval_scores
 
     self.classifier = linear_classifier
+
 
   def save_search_results(self, path, append=False):
     """
@@ -383,6 +411,7 @@ class agile2_state:
 
 
   def print_label_counts(self, label: str=None):
+    """Prints the number of positive and negative of each label in the db"""
     
     positive = self.db.get_class_counts(hoplite_interface.LabelType.POSITIVE)
     negative = self.db.get_class_counts(hoplite_interface.LabelType.NEGATIVE)
@@ -397,6 +426,7 @@ class agile2_state:
 
   def search_with_classifier(self,
       target_label, num_results=50, sample_size=1_000_000, target_score=None, dataset=None):
+    """Prepares the query and bias from the classifier params and searches with these"""
     target_labels = self.classifier.classes
     print('target_labels: ', target_labels)
     target_label_idx = target_labels.index(target_label)
@@ -466,6 +496,7 @@ class agile2_state:
 
 
   def db_summary(self):
+    """Debugging/sanity checking to see what's in the database"""
     if not self.db:
       print('DB not initialized.')
       return
@@ -474,10 +505,10 @@ class agile2_state:
     datasets = self.db.get_dataset_names()
     print(f'{len(datasets)} Dataset(s):')
     for dataset in datasets:
+      # This is slow, so commented out for now
       #print(f'{dataset}: {len(self.db.get_embeddings_by_source(dataset_name=dataset, source_id=None))} embeddings')
       print(f'{dataset}')
     self.print_label_counts()
-
 
 
   def save_classifier(self, path=None):
@@ -512,10 +543,9 @@ class agile2_state:
       site_id = site_lookup.get(int(arid), '')
       return [link, site_id]
         
-    classifier.write_inference_csv(self.classifier, self.db, output_filepath, threshold, labels, dataset, row_func=row_func)
+    classifier.write_inference_csv(self.classifier, self.db, output_filepath, threshold, labels, dataset, row_func=None)
      
     
-
 
 def download_embeddings(dataset_name, embeddings_dir):
     """
@@ -561,8 +591,6 @@ def download_embeddings(dataset_name, embeddings_dir):
         do_download()
         do_unzip()
 
-
-
     def download_again_button():
         button1 = widgets.Button(description="Download again and overwrite existing embeddings?",
                                  layout=widgets.Layout(width='auto'))
@@ -575,7 +603,6 @@ def download_embeddings(dataset_name, embeddings_dir):
         button2.on_click(lambda b: do_unzip())
         display(button2)
         
-
     embeddings_dir = Path(embeddings_dir)
     zip_path = Path(embeddings_dir) / f"{dataset_name}.zip"
 
@@ -604,8 +631,6 @@ def download_embeddings(dataset_name, embeddings_dir):
     else:
       do_download()
       do_unzip()
-
-
 
 
 def download_file(url: str, dest: str | Path, max_retries: int = 5, description: str = None) -> bool:
@@ -673,10 +698,8 @@ def download_file(url: str, dest: str | Path, max_retries: int = 5, description:
                     print("Cannot resume download - starting from beginning")
                     existing_size = 0
             
-            # Create parent directories if they don't exist
             dest.parent.mkdir(parents=True, exist_ok=True)
             
-            # Download with progress bar
             response = session.get(
                 url,
                 stream=True,
@@ -723,6 +746,7 @@ def download_file(url: str, dest: str | Path, max_retries: int = 5, description:
     
     raise Exception("Download failed after all retry attempts")
 
+
 class Helpers:
 
   @staticmethod
@@ -741,4 +765,3 @@ class Helpers:
           print("\n".join([f"{i}: {f}" for i, f in enumerate(audio_files)]))
       return audio_files
   
-
