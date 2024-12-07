@@ -518,11 +518,15 @@ class agile2_state:
     self.classifier.save(path)
      
 
-  def run_inference(self, output_filepath=None, threshold=0.0, labels=None, dataset=None):
+  def run_inference(self, output_filepath=None, threshold=0.0, labels=None, dataset=None, subset=1):
     """
     Calls the classifier.write_inference_csv() function to write the inference results to a csv file
     injecting the site_id and link columns via a row_func that uses baw_utils and 
     """
+
+    if subset <= 0 or subset > 1:
+      raise ValueError('Subset must be between 0 and 1')
+
     if output_filepath is None:
       output_filepath = Path(self.config.predictions_folder) / 'inference.csv'
     Path(output_filepath).parent.mkdir(parents=True, exist_ok=True)
@@ -543,7 +547,7 @@ class agile2_state:
       site_id = site_lookup.get(int(arid), '')
       return [link, site_id]
         
-    classifier.write_inference_csv(self.classifier, self.db, output_filepath, threshold, labels, dataset, row_func=None)
+    classifier.write_inference_csv(self.classifier, self.db, output_filepath, threshold, labels, dataset, row_func=row_func, subset=subset)
      
     
 

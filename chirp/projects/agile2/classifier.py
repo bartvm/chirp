@@ -249,6 +249,7 @@ def write_inference_csv(
     labels: Sequence[str] | None = None,
     dataset: str | None = None,
     row_func: Any = None,
+    subset: float = 1,
 ):
   """Write a CSV for all audio windows with logits above a threshold.
 
@@ -268,6 +269,15 @@ def write_inference_csv(
     None
   """
   idxes = db.get_embedding_ids(dataset=dataset)
+
+  if subset < 1:
+    n_samples = int(subset * len(idxes))
+    indices = np.arange(len(idxes))
+    np.random.shuffle(indices)
+    selected_indices = sorted(indices[:n_samples])
+    idxes = idxes[selected_indices]
+
+
   if labels is None:
     labels = linear_classifier.classes
   label_ids = {cl: i for i, cl in enumerate(linear_classifier.classes)}
