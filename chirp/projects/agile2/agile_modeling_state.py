@@ -551,7 +551,7 @@ class agile2_state:
      
     
 
-def download_embeddings(dataset_name, embeddings_dir):
+def download_embeddings(dataset_name, embeddings_dir, download_from_gcp: bool = False):
     """
     Downloads a zip file from a url based on the dataset_name and extracts it to the embeddings_dir
     Shows progress for both download and extraction
@@ -570,14 +570,20 @@ def download_embeddings(dataset_name, embeddings_dir):
         
         embeddings_dir.mkdir(parents=True, exist_ok=True)
 
+        base_url = (
+            'https://storage.googleapis.com/chirp-public-bucket/esa-2024'
+            if download_from_gcp
+            else 'https://api.ecosounds.org/system/esa2024'
+        )
+
         #dowload config.json
-        url = f'https://api.ecosounds.org/system/esa2024/embedding_config.json'
+        url = f'{base_url}/embedding_config.json'
         config_path = Path(embeddings_dir) / "config.json"
         response = requests.get(url)
         with open(config_path, 'wb') as file:
             file.write(response.content)
         
-        url = f'https://api.ecosounds.org/system/esa2024/{dataset_name}/embeddings.zip'
+        url = f'{base_url}/{dataset_name}/embeddings.zip'
         
         download_file(url, zip_path, description=f'Downloading {dataset_name} to {embeddings_dir}')
 
