@@ -174,22 +174,26 @@ def convert_parquet(
     print("Found ", len(parquet_filepaths), " embeddings files.")
 
   def generator():
-    for fp in parquet_filepaths:
+    ds = pyarrow.parquet.ParquetDataset(parquet_filepaths)
+    for fragment in ds.fragments:
         try:
-            df = pd.read_parquet(fp)
-            embeddings_table = df_to_embeddings(df)
-            embeddings, filename, timestamp_s, embedding_shape = extract_metadata(embeddings_table)
+            df = fragment.to_table().to_pandas()
+            n_channels = df['channel'].nunique()
+            filename = df['source'].iloc[0]
+            timestamp_s = 0.0  
+            df.drop(['source', 'channel', 'offset'], axis=1, inplace=True)
+            embeddings = df.to_numpy().reshape(-1, n_channels, 1280)
             filename = source_map_fn(filename)
             yield {
                 'filename': filename.encode(),
                 'timestamp_s': timestamp_s,
                 'embedding': embeddings,
-                'embedding_shape': embedding_shape
+                'embedding_shape': embeddings.shape
             }
         except Exception as e:
-            print(f"Unexpected error on {fp}: {e}")
+            print(f"Unexpected error on {fragment}: {e}")
             continue
-      
+        
     
   output_signature = {
       'filename': tf.TensorSpec(shape=(), dtype=tf.string),
